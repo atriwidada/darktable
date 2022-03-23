@@ -7,6 +7,7 @@ Build dependencies for many platforms are listed here:
 https://redmine.darktable.org/projects/darktable/wiki/Building_darktable_20
 
 ### Requirements
+
 In summary, you'll need:
 
  - `gcc`, `g++`, GNU `make` and `cmake`
@@ -19,15 +20,16 @@ Optionally, you might need for special features:
 
  - `libcups2` (for the print module)
  - `gphoto2` (for camera support, recommended)
- - `flickcurl` (for Flickr support)
- - SDL, SDL-image and Mesa OpenGL (to build darktable-viewer)
- - `osm-gps-map` and `libsoup` for geo tagging view
+ - `SDL`, SDL-image and Mesa OpenGL (to build darktable-viewer)
+ - `osm-gps-map` for geo tagging view
  - `lensfun` (lens distortion plugin)
- - OpenEXR for HDR export
+ - `libheif` for reading HEIF/HEIC images
+ - `OpenEXR` for HDR export
  - `libsecret` for storing passwords
  - `libcolord-dev` `libcolord-gtk-dev` for colour profile support
  - `webp` and `openjpeg` libraries for WebP and JPEG 2000 support
- - GraphicsMagick library for TIFF-encoded EXIF thumbnails and LDR image format support
+ - `GraphicsMagick` library for TIFF-encoded EXIF thumbnails and LDR image format support
+ - `exiftool` for creating whitebalance presets
 
 ### Build
 
@@ -39,19 +41,6 @@ $ cd build && make install (or sudo make install)
 $ darktable
 ```
 
-Optionally, to build the user manual:
-
- - Java JDK, `gnome-doc-utils`, Saxon 6.5.x, FOP and ImageMagick
- - `xsltproc` and the DocBook XML DTD and XSL stylesheets
-
-Then, type:
-
-```
-$ cd build
-$ make darktable-usermanual
-$ evince doc/usermanual/darktable-usermanual.pdf
-```
-
 Optionally, to build translations of the manual pages:
 
  - PO for anything (`po4a`)
@@ -61,7 +50,7 @@ Other used packages (supplied in the source tree):
  - RawSpeed
  - Lua 5.2 and LuaAutoc (although the local system version can be used instead)
 
-Darktable has OpenCL support for graphics cards with:
+darktable has OpenCL support for graphics cards with:
 
  - at least 1GB graphics RAM (more is better)
  - a modern AMD or nVidia chipset

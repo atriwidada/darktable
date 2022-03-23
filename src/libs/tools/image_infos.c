@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2019 Aldric Renaudin.
+    Copyright (C) 2019-2021 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -43,14 +43,13 @@ const char *name(dt_lib_module_t *self)
 const char **views(dt_lib_module_t *self)
 {
   /* we handle the hidden case here */
-  gchar *pos = dt_conf_get_string("plugins/darkroom/image_infos_position");
-  if(g_strcmp0(pos, "hidden") == 0)
+  const gboolean is_hidden =
+    dt_conf_is_equal("plugins/darkroom/image_infos_position", "hidden");
+  if(is_hidden)
   {
     static const char *vv[] = { NULL };
-    g_free(pos);
     return vv;
   }
-  g_free(pos);
 
   static const char *v[] = { "darkroom", NULL };
   return v;
@@ -58,7 +57,7 @@ const char **views(dt_lib_module_t *self)
 
 uint32_t container(dt_lib_module_t *self)
 {
-  gchar *pos = dt_conf_get_string("plugins/darkroom/image_infos_position");
+  const char *pos = dt_conf_get_string_const("plugins/darkroom/image_infos_position");
   dt_ui_container_t cont = DT_UI_CONTAINER_PANEL_CENTER_BOTTOM_CENTER; // default value
 
   if(g_strcmp0(pos, "top left") == 0)
@@ -68,7 +67,6 @@ uint32_t container(dt_lib_module_t *self)
   else if(g_strcmp0(pos, "top center") == 0)
     cont = DT_UI_CONTAINER_PANEL_CENTER_TOP_CENTER;
 
-  g_free(pos);
   return cont;
 }
 
@@ -102,6 +100,7 @@ void _lib_imageinfo_update_message(gpointer instance, dt_lib_module_t *self)
   vp->jobcode = "infos";
   vp->imgid = imgid;
   vp->sequence = 0;
+  vp->escape_markup = TRUE;
 
   gchar *pattern = dt_conf_get_string("plugins/darkroom/image_infos_pattern");
   gchar *msg = dt_variables_expand(vp, pattern, TRUE);
@@ -110,15 +109,20 @@ void _lib_imageinfo_update_message(gpointer instance, dt_lib_module_t *self)
   dt_variables_params_destroy(vp);
 
   // we change the label
-  GtkTextIter i1;
-  GtkTextIter i2;
-  GtkTextBuffer *tbuf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(d->tview));
-  gtk_text_buffer_get_start_iter(tbuf, &i1);
-  gtk_text_buffer_get_end_iter(tbuf, &i2);
-  gtk_text_buffer_delete(tbuf, &i1, &i2);
-  gtk_text_buffer_insert_markup(tbuf, &i1, msg, -1);
+  gtk_label_set_markup(GTK_LABEL(d->tview), msg);
 
   g_free(msg);
+}
+
+static void _lib_imageinfo_update_message2(gpointer instance, gpointer imgs, dt_lib_module_t *self)
+{
+  _lib_imageinfo_update_message(instance, self);
+}
+
+void _lib_imageinfo_update_message3(gpointer instance, int query_change, int changed_property, gpointer imgs,
+                                    const int next, dt_lib_module_t *self)
+{
+  _lib_imageinfo_update_message(instance, self);
 }
 
 void gui_init(dt_lib_module_t *self)
@@ -128,27 +132,34 @@ void gui_init(dt_lib_module_t *self)
   self->data = (void *)d;
 
   self->widget = gtk_event_box_new();
-  d->tview = gtk_text_view_new();
-  gtk_text_view_set_justification(GTK_TEXT_VIEW(d->tview), GTK_JUSTIFY_CENTER);
-  gtk_text_view_set_editable(GTK_TEXT_VIEW(d->tview), FALSE);
+  d->tview = gtk_label_new("");
+  gtk_label_set_ellipsize(GTK_LABEL(d->tview), PANGO_ELLIPSIZE_MIDDLE);
+  gtk_label_set_justify(GTK_LABEL(d->tview), GTK_JUSTIFY_CENTER);
   gtk_container_add(GTK_CONTAINER(self->widget), d->tview);
   gtk_widget_set_name(GTK_WIDGET(d->tview), "image-info");
 
   gtk_widget_show_all(self->widget);
 
   /* lets signup for develop image changed signals */
-  dt_control_signal_connect(darktable.signals, DT_SIGNAL_DEVELOP_IMAGE_CHANGED,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_DEVELOP_IMAGE_CHANGED,
                             G_CALLBACK(_lib_imageinfo_update_message), self);
 
   /* signup for develop initialize to update info of current
      image in darkroom when enter */
-  dt_control_signal_connect(darktable.signals, DT_SIGNAL_DEVELOP_INITIALIZE,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_DEVELOP_INITIALIZE,
                             G_CALLBACK(_lib_imageinfo_update_message), self);
+
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_IMAGE_INFO_CHANGED,
+                                  G_CALLBACK(_lib_imageinfo_update_message2), self);
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED,
+                                  G_CALLBACK(_lib_imageinfo_update_message3), self);
 }
 
 void gui_cleanup(dt_lib_module_t *self)
 {
-  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_lib_imageinfo_update_message), self);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_lib_imageinfo_update_message), self);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_lib_imageinfo_update_message2), self);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_lib_imageinfo_update_message3), self);
 
   g_free(self->data);
   self->data = NULL;

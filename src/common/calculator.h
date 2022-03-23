@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2013 tobias ellinghaus.
+    Copyright (C) 2013-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@
 #pragma once
 
 /** solve the mathematical expression in formula, the only allowed variable is 'x' */
-float dt_calculator_solve(float x, const char *formula);
+float dt_calculator_solve(const float x, const char *formula);
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

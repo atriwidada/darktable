@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2016 tobias ellinghaus.
+    Copyright (C) 2016-2021 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -39,6 +39,8 @@
 #endif
 
 const double thrs = 200.0;
+
+static const point_t bb_ref[] = {{.x=.0, .y=.0}, {.x=1., .y=0.}, {.x=1., .y=1.}, {.x=0., .y=1.}};
 
 enum
 {
@@ -90,7 +92,7 @@ static void collect_reference_patches_foreach(gpointer key, gpointer value, gpoi
 static box_t *find_patch(GHashTable *table, gpointer key);
 static void get_boundingbox(const image_t *const image, point_t *bb);
 static box_t get_sample_box(chart_t *chart, box_t *outer_box, float shrink);
-static void get_corners(point_t *bb, box_t *box, point_t *corners);
+static void get_corners(const float *homography, box_t *box, point_t *corners);
 static void get_pixel_region(const image_t *const image, const point_t *const corners, int *x_start, int *y_start,
                              int *x_end, int *y_end);
 static void reset_bb(image_t *image);
@@ -134,16 +136,20 @@ static gboolean draw_image_callback(GtkWidget *widget, cairo_t *cr, gpointer use
 
   // draw overlay
   point_t bb[4];
+  float homography[9];
   map_boundingbox_to_view(image, bb);
+  // calculating the homography takes hardly any time, so we do it here instead of the move handler.
+  // the benefits are that the window size is taken into account and image->bb can't disagree with the cached homography
+  get_homography(bb_ref, bb, homography);
 
   draw_boundingbox(cr, bb);
-  draw_f_boxes(cr, bb, chart);
-  draw_d_boxes(cr, bb, chart);
-  draw_color_boxes_outline(cr, bb, chart);
+  draw_f_boxes(cr, homography, chart);
+  draw_d_boxes(cr, homography, chart);
+  draw_color_boxes_outline(cr, homography, chart);
 
   stroke_boxes(cr, 1.0);
 
-  draw_color_boxes_inside(cr, bb, chart, image->shrink, 2.0, image->draw_colored);
+  draw_color_boxes_inside(cr, homography, chart, image->shrink, 2.0, image->draw_colored);
 
   return FALSE;
 }
@@ -166,18 +172,24 @@ static point_t map_point_to_view(image_t *image, point_t p)
 static gboolean motion_notify_callback_source(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)
 {
   dt_lut_t *self = (dt_lut_t *)user_data;
-  gboolean res = handle_motion(widget, event, self, &self->source);
-  collect_source_patches(self);
-  update_table(self);
+  const gboolean res = handle_motion(widget, event, self, &self->source);
+  if(res)
+  {
+    collect_source_patches(self);
+    update_table(self);
+  }
   return res;
 }
 
 static gboolean motion_notify_callback_reference(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)
 {
   dt_lut_t *self = (dt_lut_t *)user_data;
-  gboolean res = handle_motion(widget, event, self, &self->reference);
-  collect_reference_patches(self);
-  update_table(self);
+  const gboolean res = handle_motion(widget, event, self, &self->reference);
+  if(res)
+  {
+    collect_reference_patches(self);
+    update_table(self);
+  }
   return res;
 }
 
@@ -194,8 +206,29 @@ static gboolean handle_motion(GtkWidget *widget, GdkEventMotion *event, dt_lut_t
 
   update_corner(image, closest_corner, &x, &y);
 
-  image->bb[closest_corner].x = x;
-  image->bb[closest_corner].y = y;
+  // check if the shape would turn concave by testing if the new location
+  // is inside the triangle formed by the other three. google barycentric coordinates to see how it's done.
+  const int prev_corner = (closest_corner + 3) % 4;
+  const int opposite_corner = (closest_corner + 2) % 4;
+  const int next_corner = (closest_corner + 1) % 4;
+
+  const float x1 = image->bb[prev_corner].x;
+  const float y1 = image->bb[prev_corner].y;
+  const float x2 = image->bb[next_corner].x;
+  const float y2 = image->bb[next_corner].y;
+  const float x3 = image->bb[opposite_corner].x;
+  const float y3 = image->bb[opposite_corner].y;
+
+  const float denom = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3);
+  const float l1 = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / denom;
+  const float l2 = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / denom;
+  const float l3 = 1.0 - l1 - l2;
+
+  if(l1 < 0.0 || l2 < 0.0 || l3 < 0.0)
+  {
+    image->bb[closest_corner].x = x;
+    image->bb[closest_corner].y = y;
+  }
 
   gtk_widget_queue_draw(widget);
 
@@ -292,7 +325,8 @@ static char *get_filename_base(const char *filename)
 
 static gboolean open_reference_image(dt_lut_t *self, const char *filename)
 {
-  gboolean res = open_image(&self->reference, filename);
+  const gboolean initial_loading = (self->reference.xyz == NULL);
+  const gboolean res = open_image(&self->reference, filename);
   gtk_widget_set_sensitive(self->process_button, res);
   gtk_widget_set_sensitive(self->export_button, FALSE);
   gtk_widget_set_sensitive(self->export_raw_button, FALSE);
@@ -300,6 +334,12 @@ static gboolean open_reference_image(dt_lut_t *self, const char *filename)
     gtk_file_chooser_unselect_all(GTK_FILE_CHOOSER(self->reference_image_button));
   else
   {
+    if(initial_loading)
+    {
+      // copy over the bounding box from the source image.
+      // when matching raw to jpeg this is in general what the user wants
+      memcpy(self->reference.bb, self->source.bb, sizeof(self->reference.bb));
+    }
     collect_reference_patches(self);
     update_table(self);
     free(self->reference_filename);
@@ -365,7 +405,7 @@ static void cht_changed_callback(GtkFileChooserButton *widget, gpointer user_dat
 static gboolean open_cht(dt_lut_t *self, const char *filename)
 {
   if(self->chart) free_chart(self->chart);
-  gboolean res = ((self->chart = parse_cht(filename)) != NULL);
+  const gboolean res = ((self->chart = parse_cht(filename)) != NULL);
 
   reset_bb(&self->source);
   reset_bb(&self->reference);
@@ -402,7 +442,7 @@ static gboolean open_cht(dt_lut_t *self, const char *filename)
 static void reference_mode_changed_callback(GtkComboBox *widget, gpointer user_data)
 {
   dt_lut_t *self = (dt_lut_t *)user_data;
-  int selected = gtk_combo_box_get_active(widget);
+  const int selected = gtk_combo_box_get_active(widget);
   if(selected == 0)
   {
     // it8
@@ -435,7 +475,7 @@ static void it8_changed_callback(GtkFileChooserButton *widget, gpointer user_dat
 static gboolean open_it8(dt_lut_t *self, const char *filename)
 {
   if(!self->chart || !filename) return FALSE;
-  gboolean res = parse_it8(filename, self->chart);
+  const gboolean res = parse_it8(filename, self->chart);
   collect_source_patches(self);
   update_table(self);
 
@@ -455,7 +495,8 @@ static gboolean open_it8(dt_lut_t *self, const char *filename)
   return res;
 }
 
-static char *get_export_filename(dt_lut_t *self, const char *extension, char **name, char **description)
+static char *get_export_filename(dt_lut_t *self, const char *extension, char **name, char **description,
+                                 gboolean *basecurve, gboolean *colorchecker, gboolean *colorin, gboolean *tonecurve)
 {
   GtkWidget *name_entry = NULL, *description_entry = NULL;
   GtkWidget *dialog
@@ -478,6 +519,7 @@ static char *get_export_filename(dt_lut_t *self, const char *extension, char **n
   GtkWidget *grid = gtk_grid_new();
   gtk_grid_set_row_spacing(GTK_GRID(grid), 10);
   gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
+  gtk_grid_set_row_homogeneous(GTK_GRID(grid), TRUE);
 
   *name = g_strdup(self->reference_filename);
   *description = g_strdup_printf("fitted LUT style from %s", self->reference_filename);
@@ -494,10 +536,39 @@ static char *get_export_filename(dt_lut_t *self, const char *extension, char **n
   *name = NULL;
   *description = NULL;
 
-  gtk_grid_attach(GTK_GRID(grid), gtk_label_new("style name"), 0, 0, 1, 1);
+  GtkWidget *label;
+  label = gtk_label_new("style name");
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  gtk_grid_attach(GTK_GRID(grid), label, 0, 0, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), name_entry, 1, 0, 1, 1);
-  gtk_grid_attach(GTK_GRID(grid), gtk_label_new("style description"), 0, 1, 1, 1);
+  label = gtk_label_new("style description");
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  gtk_grid_attach(GTK_GRID(grid), label, 0, 1, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), description_entry, 1, 1, 1, 1);
+
+  // allow the user to decide what modules to include in the style
+  label = gtk_label_new("modules included in the style:");
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  g_object_set(label, "margin-left", 50, NULL);
+
+  GtkWidget *cb_basecurve = gtk_check_button_new_with_label("base curve");
+  GtkWidget *cb_colorchecker = gtk_check_button_new_with_label("color look up table");
+  GtkWidget *cb_colorin = gtk_check_button_new_with_label("input color profile");
+  GtkWidget *cb_tonecurve = gtk_check_button_new_with_label("tone curve");
+
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(cb_basecurve), TRUE);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(cb_colorchecker), TRUE);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(cb_colorin), TRUE);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(cb_tonecurve), TRUE);
+
+  if(basecurve)
+  {
+    gtk_grid_attach(GTK_GRID(grid), label, 2, 0, 1, 1);
+    gtk_grid_attach_next_to(GTK_GRID(grid), cb_basecurve, label, GTK_POS_RIGHT, 1, 1);
+    gtk_grid_attach_next_to(GTK_GRID(grid), cb_colorchecker, cb_basecurve, GTK_POS_BOTTOM, 1, 1);
+    gtk_grid_attach_next_to(GTK_GRID(grid), cb_colorin, cb_colorchecker, GTK_POS_BOTTOM, 1, 1);
+    gtk_grid_attach_next_to(GTK_GRID(grid), cb_tonecurve, cb_colorin, GTK_POS_BOTTOM, 1, 1);
+  }
 
   gtk_widget_show_all(grid);
 
@@ -510,6 +581,14 @@ static char *get_export_filename(dt_lut_t *self, const char *extension, char **n
     filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
     *name = g_strdup(gtk_entry_get_text(GTK_ENTRY(name_entry)));
     *description = g_strdup(gtk_entry_get_text(GTK_ENTRY(description_entry)));
+    if(basecurve)
+    {
+      // either request all of them or none ...
+      *basecurve = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(cb_basecurve));
+      *colorchecker = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(cb_colorchecker));
+      *colorin = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(cb_colorin));
+      *tonecurve = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(cb_tonecurve));
+    }
   }
   gtk_widget_destroy(dialog);
 
@@ -530,7 +609,7 @@ static void print_patches(dt_lut_t *self, FILE *fd, GList *patch_names)
       continue;
     }
 
-    float source_Lab[3] = { 0.0 }, reference_Lab[3] = { 0.0 };
+    dt_aligned_pixel_t source_Lab = { 0.0 }, reference_Lab = { 0.0 };
     get_Lab_from_box(source_patch, source_Lab);
     get_Lab_from_box(reference_patch, reference_Lab);
 
@@ -557,7 +636,9 @@ static void print_xml_plugin(FILE *fd, int num, int op_version, const char *oper
   fprintf(fd, "  </plugin>\n");
 }
 
-static void export_style(dt_lut_t *self, const char *filename, const char *name, const char *description)
+static void export_style(dt_lut_t *self, const char *filename, const char *name, const char *description,
+                         gboolean include_basecurve, gboolean include_colorchecker, gboolean include_colorin,
+                         gboolean include_tonecurve)
 {
   int num = 0;
 
@@ -573,17 +654,29 @@ static void export_style(dt_lut_t *self, const char *filename, const char *name,
   fprintf(fd, "<style>\n");
 
   // 0: disable basecurve
-  print_xml_plugin(fd, num++, 2, "basecurve",
-                   "gz09eJxjYIAAM6vnNnqyn22E9n235b6aa3cy6rVdRaK9/Y970fYf95bbMzA0QPEoGEqADYnNhMQGAO0WEJo=", FALSE);
+  if(include_basecurve)
+  {
+    print_xml_plugin(fd, num++, 2, "basecurve",
+                     "gz09eJxjYIAAM6vnNnqyn22E9n235b6aa3cy6rVdRaK9/Y970fYf95bbMzA0QPEoGEqADYnNhMQGAO0WEJo=", FALSE);
+  }
   // 1: set colorin to standard matrix
-  // print_xml_plugin(fd, num++, 4, "colorin", "gz10eJzjZqA/AAAFcAAM", TRUE); // no gamut clipping
-  // and enable gamut clipping. the it8 knows nothing about colours outside
-  // rec2020 (only reflectances, no neon lights for instance)
-  print_xml_plugin(fd, num++, 4, "colorin", "gz09eJzjZqAfYIHSAAWQABA=", TRUE); // gamut clipping to rec2020
+  if(include_colorin)
+  {
+    // print_xml_plugin(fd, num++, 4, "colorin", "gz10eJzjZqA/AAAFcAAM", TRUE); // no gamut clipping
+    // and enable gamut clipping. the it8 knows nothing about colours outside
+    // rec2020 (only reflectances, no neon lights for instance)
+    print_xml_plugin(fd, num++, 4, "colorin", "gz09eJzjZqAfYIHSAAWQABA=", TRUE); // gamut clipping to rec2020
+  }
   // 2: add tonecurve
-  print_xml_plugin(fd, num++, 4, "tonecurve", self->tonecurve_encoded, TRUE);
+  if(include_tonecurve)
+  {
+    print_xml_plugin(fd, num++, 4, "tonecurve", self->tonecurve_encoded, TRUE);
+  }
   // 3: add lut
-  print_xml_plugin(fd, num++, 2, "colorchecker", self->colorchecker_encoded, TRUE);
+  if(include_colorchecker)
+  {
+    print_xml_plugin(fd, num++, 2, "colorchecker", self->colorchecker_encoded, TRUE);
+  }
 
   fprintf(fd, "</style>\n");
   fprintf(fd, "</darktable_style>\n");
@@ -622,7 +715,7 @@ static void export_raw_button_clicked_callback(GtkButton *button, gpointer user_
   if(!self->chart) return;
 
   char *name = NULL, *description = NULL;
-  char *filename = get_export_filename(self, ".csv", &name, &description);
+  char *filename = get_export_filename(self, ".csv", &name, &description, NULL, NULL, NULL, NULL);
   if(filename) export_raw(self, filename, name, description);
   g_free(name);
   g_free(description);
@@ -635,8 +728,11 @@ static void export_button_clicked_callback(GtkButton *button, gpointer user_data
   if(!self->tonecurve_encoded || !self->colorchecker_encoded) return;
 
   char *name = NULL, *description = NULL;
-  char *filename = get_export_filename(self, ".dtstyle", &name, &description);
-  if(filename) export_style(self, filename, name, description);
+  gboolean include_basecurve, include_colorchecker, include_colorin, include_tonecurve;
+  char *filename = get_export_filename(self, ".dtstyle", &name, &description,
+                                       &include_basecurve, &include_colorchecker, &include_colorin, &include_tonecurve);
+  if(filename) export_style(self, filename, name, description,
+                            include_basecurve, include_colorchecker, include_colorin, include_tonecurve);
   g_free(name);
   g_free(description);
   g_free(filename);
@@ -657,7 +753,7 @@ static void add_patches_to_array(dt_lut_t *self, GList *patch_names, int *N, int
       continue;
     }
 
-    float source_Lab[3] = { 0.0 }, reference_Lab[3] = { 0.0 };
+    dt_aligned_pixel_t source_Lab = { 0.0 }, reference_Lab = { 0.0 };
     get_Lab_from_box(source_patch, source_Lab);
     get_Lab_from_box(reference_patch, reference_Lab);
 
@@ -724,20 +820,20 @@ static void add_hdr_patches(int *N, double **target_L, double **target_a, double
 
   if(n_extra_patches > 0)
   {
-    *target_L = realloc(*target_L, (*N + n_extra_patches + 4) * sizeof(double));
-    *target_a = realloc(*target_a, (*N + n_extra_patches + 4) * sizeof(double));
-    *target_b = realloc(*target_b, (*N + n_extra_patches + 4) * sizeof(double));
-    *colorchecker_Lab = realloc(*colorchecker_Lab, 3 * (*N + n_extra_patches) * sizeof(double));
+    *target_L = realloc(*target_L, sizeof(double) * (*N + n_extra_patches + 4));
+    *target_a = realloc(*target_a, sizeof(double) * (*N + n_extra_patches + 4));
+    *target_b = realloc(*target_b, sizeof(double) * (*N + n_extra_patches + 4));
+    *colorchecker_Lab = realloc(*colorchecker_Lab, sizeof(double) * 3 * (*N + n_extra_patches));
 
-    memmove(&(*target_L)[n_extra_patches], *target_L, *N * sizeof(double));
-    memmove(&(*target_a)[n_extra_patches], *target_a, *N * sizeof(double));
-    memmove(&(*target_b)[n_extra_patches], *target_b, *N * sizeof(double));
-    memmove(&(*colorchecker_Lab)[3 * n_extra_patches], *colorchecker_Lab, 3 * *N * sizeof(double));
+    memmove(&(*target_L)[n_extra_patches], *target_L, sizeof(double) * *N);
+    memmove(&(*target_a)[n_extra_patches], *target_a, sizeof(double) * *N);
+    memmove(&(*target_b)[n_extra_patches], *target_b, sizeof(double) * *N);
+    memmove(&(*colorchecker_Lab)[3 * n_extra_patches], *colorchecker_Lab, sizeof(double) * 3 * *N);
 
-    memcpy(*target_L, extra_target_L, n_extra_patches * sizeof(double));
-    memcpy(*target_a, extra_target_a, n_extra_patches * sizeof(double));
-    memcpy(*target_b, extra_target_b, n_extra_patches * sizeof(double));
-    memcpy(*colorchecker_Lab, extra_colorchecker_Lab, 3 * n_extra_patches * sizeof(double));
+    memcpy(*target_L, extra_target_L, sizeof(double) * n_extra_patches);
+    memcpy(*target_a, extra_target_a, sizeof(double) * n_extra_patches);
+    memcpy(*target_b, extra_target_b, sizeof(double) * n_extra_patches);
+    memcpy(*colorchecker_Lab, extra_colorchecker_Lab, sizeof(double) * 3 * n_extra_patches);
 
     *N += n_extra_patches;
   }
@@ -823,11 +919,11 @@ static char *encode_colorchecker(int num, const double *point, const double **ta
     params.target_b[k] = target[2][permutation[k]];
   }
 
-#define SWAP(a, b)                                                                                                \
-  {                                                                                                               \
-    const float tmp = (a);                                                                                        \
-    (a) = (b);                                                                                                    \
-    (b) = tmp;                                                                                                    \
+#define SWAP(a, b)          \
+  {                         \
+    const float tmp = (a);  \
+    (a) = (b);              \
+    (b) = tmp;              \
   }
   // bubble sort by octant and brightness:
   for(int k = 0; k < num - 1; k++)
@@ -868,13 +964,13 @@ static void process_data(dt_lut_t *self, double *target_L, double *target_a, dou
   int num_tonecurve = 0;
   {
     int cnt = 0;
-    
+
     for(int i=0;i<N;i++)
     {
-      double sat_in =
+      const double sat_in =
         colorchecker_Lab[3*i+1] * colorchecker_Lab[3*i+1] +
         colorchecker_Lab[3*i+2] * colorchecker_Lab[3*i+2];
-      double sat_out = 
+      const double sat_out =
         target_a[i] * target_a[i] +
         target_b[i] * target_b[i];
       // we'll allow some artistic tint or one due to illuminants (note square scale)
@@ -922,7 +1018,7 @@ static void process_data(dt_lut_t *self, double *target_L, double *target_a, dou
   cx[num_tonecurve - 1] = cy[num_tonecurve - 1] = 100.0; // fix white
   for(int k = 1; k < num_tonecurve-1; k++)
   {
-    float rgb[3], Lab[3] = { 0.0f, 0.0f, 0.0f };
+    dt_aligned_pixel_t rgb, Lab = { 0.0f, 0.0f, 0.0f };
     Lab[0] = grays[6*k+0];
     dt_Lab_to_prophotorgb(Lab, rgb);
     cx[k] = rgb[0];
@@ -936,7 +1032,7 @@ static void process_data(dt_lut_t *self, double *target_L, double *target_a, dou
   // now unapply the curve:
   for(int k = 0; k < N; k++)
   {
-    float rgb[3], Lab[3] = { 0.0f, 0.0f, 0.0f };
+    dt_aligned_pixel_t rgb, Lab = { 0.0f, 0.0f, 0.0f };
     Lab[0] = target_L[k];
     Lab[1] = target_a[k];
     Lab[2] = target_b[k];
@@ -953,11 +1049,11 @@ static void process_data(dt_lut_t *self, double *target_L, double *target_a, dou
 #endif
 
   const double *target[3] = { target_L, target_a, target_b };
-  double *coeff_L = malloc((N + 4) * sizeof(double));
-  double *coeff_a = malloc((N + 4) * sizeof(double));
-  double *coeff_b = malloc((N + 4) * sizeof(double));
+  double *coeff_L = malloc(sizeof(double) * (N + 4) );
+  double *coeff_a = malloc(sizeof(double) * (N + 4) );
+  double *coeff_b = malloc(sizeof(double) * (N + 4) );
   double *coeff[] = { coeff_L, coeff_a, coeff_b };
-  int *perm = malloc((N + 4) * sizeof(int));
+  int *perm = malloc(sizeof(int) * (N + 4));
   double avgerr, maxerr;
   sparsity = thinplate_match(&tonecurve, 3, N, colorchecker_Lab, target, sparsity, perm, coeff, &avgerr, &maxerr);
 
@@ -968,7 +1064,7 @@ static void process_data(dt_lut_t *self, double *target_L, double *target_a, dou
     gtk_label_set_text(GTK_LABEL(self->result_label), result_string);
     g_free(result_string);
   }
-  
+
   free(coeff_b);
   free(coeff_a);
   free(coeff_L);
@@ -1011,7 +1107,7 @@ static void process_button_clicked_callback(GtkButton *button, gpointer user_dat
   double *target_L = (double *)calloc(sizeof(double), (N + 4));
   double *target_a = (double *)calloc(sizeof(double), (N + 4));
   double *target_b = (double *)calloc(sizeof(double), (N + 4));
-  double *colorchecker_Lab = (double *)calloc(3 * sizeof(double), N);
+  double *colorchecker_Lab = (double *)calloc(sizeof(double) * 3, N);
 
   GHashTableIter table_iter;
   gpointer set_key, value;
@@ -1030,6 +1126,7 @@ static void process_button_clicked_callback(GtkButton *button, gpointer user_dat
   process_data(self, target_L, target_a, target_b, colorchecker_Lab, N, sparsity);
 
   gtk_widget_set_sensitive(self->export_button, TRUE);
+  gtk_widget_set_sensitive(self->export_raw_button, TRUE);
 
   free(target_L);
   free(target_a);
@@ -1274,7 +1371,7 @@ static void update_table(dt_lut_t *self)
     box_t *box = (box_t *)g_hash_table_lookup(self->chart->box_table, name);
     if(box)
     {
-      float Lab[3] = { 0.0 };
+      dt_aligned_pixel_t Lab = { 0.0 };
       char *s_Lab_in, *s_RGB_in, *s_deltaE_1976, *s_deltaE_2000;
       float deltaE_1976 = 0.0, deltaE_2000 = 0.0;
 
@@ -1283,7 +1380,7 @@ static void update_table(dt_lut_t *self)
       box_t *patch = (box_t *)g_hash_table_lookup(self->picked_source_patches, name);
       if(patch)
       {
-        float in_Lab[3] = { 0.0 };
+        dt_aligned_pixel_t in_Lab = { 0.0 };
         get_Lab_from_box(patch, in_Lab);
         s_RGB_in = g_strdup_printf("%d; %d; %d", (int)(patch->rgb[0] * 255 + 0.5),
                                    (int)(patch->rgb[1] * 255 + 0.5), (int)(patch->rgb[2] * 255 + 0.5));
@@ -1323,7 +1420,7 @@ static void get_Lab_from_box(box_t *box, float *Lab)
   {
     case DT_COLORSPACE_XYZ:
     {
-      float XYZ[3];
+      dt_aligned_pixel_t XYZ;
       for(int i = 0; i < 3; i++) XYZ[i] = box->color[i] * 0.01;
       dt_XYZ_to_Lab(XYZ, Lab);
       break;
@@ -1370,24 +1467,24 @@ static void collect_source_patches_foreach(gpointer key, gpointer value, gpointe
 {
   dt_lut_t *self = (dt_lut_t *)user_data;
   box_t *box = (box_t *)value;
-  float xyz[3] /*, lab[3], srgb[3]*/;
+  dt_aligned_pixel_t xyz;
 
   box_t *patch = find_patch(self->picked_source_patches, key);
 
   get_xyz_sample_from_image(&self->source, self->source.shrink, box, xyz);
 
-  set_color(patch, DT_COLORSPACE_XYZ, xyz[0] * 100.0, xyz[1] * 100.0, xyz[2] * 100.0);
+  checker_set_color(patch, DT_COLORSPACE_XYZ, xyz[0] * 100.0, xyz[1] * 100.0, xyz[2] * 100.0);
 }
 
 static void collect_reference_patches_foreach(gpointer key, gpointer value, gpointer user_data)
 {
   dt_lut_t *self = (dt_lut_t *)user_data;
   box_t *patch = (box_t *)value;
-  float xyz[3];
+  dt_aligned_pixel_t xyz;
 
   get_xyz_sample_from_image(&self->reference, self->reference.shrink, patch, xyz);
 
-  set_color(patch, DT_COLORSPACE_XYZ, xyz[0] * 100.0, xyz[1] * 100.0, xyz[2] * 100.0);
+  checker_set_color(patch, DT_COLORSPACE_XYZ, xyz[0] * 100.0, xyz[1] * 100.0, xyz[2] * 100.0);
 }
 
 static box_t *find_patch(GHashTable *table, gpointer key)
@@ -1405,6 +1502,7 @@ static box_t *find_patch(GHashTable *table, gpointer key)
 static void get_xyz_sample_from_image(const image_t *const image, float shrink, box_t *box, float *xyz)
 {
   point_t bb[4];
+  float homography[9];
   point_t corners[4];
   box_t inner_box;
   int x_start, y_start, x_end, y_end;
@@ -1414,29 +1512,30 @@ static void get_xyz_sample_from_image(const image_t *const image, float shrink, 
   if(!box) return;
 
   get_boundingbox(image, bb);
+  get_homography(bb_ref, bb, homography);
   inner_box = get_sample_box(*(image->chart), box, shrink);
-  get_corners(bb, &inner_box, corners);
+  get_corners(homography, &inner_box, corners);
   get_pixel_region(image, corners, &x_start, &y_start, &x_end, &y_end);
 
-  float delta_x_top = corners[TOP_RIGHT].x - corners[TOP_LEFT].x;
-  float delta_y_top = corners[TOP_RIGHT].y - corners[TOP_LEFT].y;
-  float delta_x_bottom = corners[BOTTOM_RIGHT].x - corners[BOTTOM_LEFT].x;
-  float delta_y_bottom = corners[BOTTOM_RIGHT].y - corners[BOTTOM_LEFT].y;
-  float delta_x_left = corners[BOTTOM_LEFT].x - corners[TOP_LEFT].x;
-  float delta_y_left = corners[BOTTOM_LEFT].y - corners[TOP_LEFT].y;
-  float delta_x_right = corners[BOTTOM_RIGHT].x - corners[TOP_RIGHT].x;
-  float delta_y_right = corners[BOTTOM_RIGHT].y - corners[TOP_RIGHT].y;
+  const float delta_x_top = corners[TOP_RIGHT].x - corners[TOP_LEFT].x;
+  const float delta_y_top = corners[TOP_RIGHT].y - corners[TOP_LEFT].y;
+  const float delta_x_bottom = corners[BOTTOM_RIGHT].x - corners[BOTTOM_LEFT].x;
+  const float delta_y_bottom = corners[BOTTOM_RIGHT].y - corners[BOTTOM_LEFT].y;
+  const float delta_x_left = corners[BOTTOM_LEFT].x - corners[TOP_LEFT].x;
+  const float delta_y_left = corners[BOTTOM_LEFT].y - corners[TOP_LEFT].y;
+  const float delta_x_right = corners[BOTTOM_RIGHT].x - corners[TOP_RIGHT].x;
+  const float delta_y_right = corners[BOTTOM_RIGHT].y - corners[TOP_RIGHT].y;
 
   double sample_x = 0.0, sample_y = 0.0, sample_z = 0.0;
   size_t n_samples = 0;
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
   dt_omp_firstprivate(image) \
-  shared(corners, x_start, y_start, x_end, y_end, delta_x_top, delta_y_top, \
-         delta_x_bottom, delta_y_bottom, delta_x_left, delta_y_left, \
-         delta_x_right, delta_y_right) \
+  shared(corners, x_start, y_start, x_end, y_end) \
+  dt_omp_sharedconst(delta_x_top, delta_y_top, delta_x_bottom, delta_y_bottom, delta_x_left, \
+                     delta_y_left, delta_x_right, delta_y_right) \
   reduction(+ : n_samples, sample_x, sample_y, sample_z) \
-  schedule(static) 
+  schedule(static)
 #endif
   for(int y = y_start; y < y_end; y++)
     for(int x = x_start; x < x_end; x++)
@@ -1479,7 +1578,7 @@ static box_t get_sample_box(chart_t *chart, box_t *outer_box, float shrink)
   return inner_box;
 }
 
-static void get_corners(point_t *bb, box_t *box, point_t *corners)
+static void get_corners(const float *homography, box_t *box, point_t *corners)
 {
   corners[TOP_LEFT] = corners[TOP_RIGHT] = corners[BOTTOM_RIGHT] = corners[BOTTOM_LEFT] = box->p;
   corners[TOP_RIGHT].x += box->w;
@@ -1487,7 +1586,7 @@ static void get_corners(point_t *bb, box_t *box, point_t *corners)
   corners[BOTTOM_RIGHT].y += box->h;
   corners[BOTTOM_LEFT].y += box->h;
 
-  for(int i = 0; i < 4; i++) corners[i] = transform_coords(corners[i], bb);
+  for(int i = 0; i < 4; i++) corners[i] = apply_homography(corners[i], homography);
 }
 
 static void get_pixel_region(const image_t *const image, const point_t *const corners, int *x_start, int *y_start,
@@ -1626,6 +1725,9 @@ static int main_gui(dt_lut_t *self, int argc, char *argv[])
     }
   }
 
+#ifdef GDK_WINDOWING_QUARTZ
+  dt_osx_focus_window();
+#endif
   gtk_main();
 
   return 0;
@@ -1691,7 +1793,7 @@ static int parse_csv(dt_lut_t *self, const char *filename, double **target_L_ptr
   double *target_L = (double *)calloc(sizeof(double), (N + 4));
   double *target_a = (double *)calloc(sizeof(double), (N + 4));
   double *target_b = (double *)calloc(sizeof(double), (N + 4));
-  double *source_Lab = (double *)calloc(3 * sizeof(double), N);
+  double *source_Lab = (double *)calloc(sizeof(double) * 3, N);
   *target_L_ptr = target_L;
   *target_a_ptr = target_a;
   *target_b_ptr = target_b;
@@ -1723,7 +1825,7 @@ static int parse_csv(dt_lut_t *self, const char *filename, double **target_L_ptr
     target_b[i] = g_ascii_strtod(iter, &endptr);
     if(iter == endptr || *endptr != '\n') break;
 
-    double d[3] = { target_L[i], target_a[i], target_b[i] };
+    const double d[3] = { target_L[i], target_a[i], target_b[i] };
     if(sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) > thrs)
     {
       fprintf(stderr, "warning: ignoring patch %s with large difference deltaE %g!\n", patchname,
@@ -1745,7 +1847,7 @@ static int main_csv(dt_lut_t *self, int argc, char *argv[])
   const int num_patches = atoi(argv[3]);
   const char *filename_style = argv[4];
 
-  int sparsity = num_patches + 4;
+  const int sparsity = num_patches + 4;
 
   // parse the csv
   double *target_L, *target_a, *target_b, *colorchecker_Lab;
@@ -1770,7 +1872,8 @@ static int main_csv(dt_lut_t *self, int argc, char *argv[])
 
   process_data(self, target_L, target_a, target_b, colorchecker_Lab, N, sparsity);
 
-  export_style(self, filename_style, name, description);
+  // TODO: add command line options to control what modules to include
+  export_style(self, filename_style, name, description, TRUE, TRUE, TRUE, TRUE);
 
   free(target_L);
   free(target_a);

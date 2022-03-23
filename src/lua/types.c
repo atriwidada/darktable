@@ -1,6 +1,6 @@
 /*
    This file is part of darktable,
-   copyright (c) 2012 Jeremy Rosen
+   Copyright (C) 2013-2020 darktable developers.
 
    darktable is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -317,9 +317,9 @@ static int autotype_tostring(lua_State *L)
 static int full_pushfunc(lua_State *L, luaA_Type type_id, const void *cin)
 {
   size_t type_size = luaA_typesize(L, type_id);
-  void *udata = lua_newuserdata(L, type_size);
+  void *udata = lua_newuserdatauv(L, type_size, 1);
   lua_newtable(L);
-  lua_setuservalue(L, -2);
+  lua_setiuservalue(L, -2, 1);
   if(cin)
   {
     memcpy(udata, cin, type_size);
@@ -345,7 +345,7 @@ static void full_tofunc(lua_State *L, luaA_Type type_id, void *cout, int index)
     char error_msg[256];
     snprintf(error_msg,sizeof(error_msg),"%s expected",luaA_typename(L,type_id));
     luaL_argerror(L,index,error_msg);
-  } 
+  }
   void* udata = lua_touserdata(L,index);
   memcpy(cout, udata, luaA_typesize(L, type_id));
 }
@@ -360,7 +360,7 @@ static int int_pushfunc(lua_State *L, luaA_Type type_id, const void *cin)
   if(lua_isnoneornil(L, -1))
   {
     lua_pop(L, 1);
-    int *udata = lua_newuserdata(L, sizeof(int));
+    int *udata = lua_newuserdatauv(L, sizeof(int), 1);
     *udata = singleton;
     luaL_setmetatable(L, luaA_typename(L, type_id));
     lua_pushinteger(L, singleton);
@@ -385,7 +385,7 @@ static void int_tofunc(lua_State *L, luaA_Type type_id, void *cout, int index)
     char error_msg[256];
     snprintf(error_msg,sizeof(error_msg),"%s expected",luaA_typename(L,type_id));
     luaL_argerror(L,index,error_msg);
-  } 
+  }
   void* udata = lua_touserdata(L,index);
   memcpy(cout, udata, sizeof(int));
 }
@@ -403,9 +403,9 @@ static int gpointer_pushfunc(lua_State *L, luaA_Type type_id, const void *cin)
   if(lua_isnoneornil(L, -1))
   {
     lua_pop(L, 1);
-    gpointer *udata = lua_newuserdata(L, sizeof(gpointer));
+    gpointer *udata = lua_newuserdatauv(L, sizeof(gpointer), 1);
     lua_newtable(L);
-    lua_setuservalue(L, -2);
+    lua_setiuservalue(L, -2, 1);
     *udata = singleton;
     luaL_setmetatable(L, luaA_typename(L, type_id));
     lua_pushlightuserdata(L, singleton);
@@ -428,7 +428,7 @@ static void gpointer_tofunc(lua_State *L, luaA_Type type_id, void *cout, int ind
     char error_msg[256];
     snprintf(error_msg,sizeof(error_msg),"%s expected",luaA_typename(L,type_id));
     luaL_argerror(L,index,error_msg);
-  } 
+  }
   gpointer* udata = lua_touserdata(L,index);
   memcpy(cout, udata, sizeof(gpointer));
   if(!*udata) {
@@ -679,9 +679,9 @@ luaA_Type dt_lua_init_singleton(lua_State *L, const char *unique_name, void *dat
   luaA_Type type_id = luaA_type_add(L, tmp_name, sizeof(void *));
   init_metatable(L, type_id);
 
-  void **udata = lua_newuserdata(L, sizeof(void *));
+  void **udata = lua_newuserdatauv(L, sizeof(void *), 1);
   lua_newtable(L);
-  lua_setuservalue(L, -2);
+  lua_setiuservalue(L, -2, 1);
   if(!data)
   {
     memset(udata, 0, sizeof(void *));
@@ -780,7 +780,7 @@ luaA_Type dt_lua_init_int_type_type(lua_State *L, luaA_Type type_id)
   return type_id;
 }
 
-static int gpointer_wrapper(lua_State*L) 
+static int gpointer_wrapper(lua_State*L)
 {
   gpointer *udata = (gpointer*)lua_touserdata(L,1);
   if(!*udata) {
@@ -888,7 +888,7 @@ gboolean dt_lua_typeisa_type(lua_State *L, luaA_Type obj_type, luaA_Type type_id
 void dt_lua_type_setmetafield_type(lua_State*L,luaA_Type type_id,const char* method_name)
 {
   // These metafields should never be overridden by user code
-  if( 
+  if(
       !strcmp(method_name,"__index") ||
       !strcmp(method_name,"__newindex") ||
       !strcmp(method_name,"__number_index") ||

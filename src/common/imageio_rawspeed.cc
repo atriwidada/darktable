@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2011 johannes hanika.
+    Copyright (C) 2010-2022 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -22,6 +22,9 @@
 
 #include "RawSpeed-API.h"
 
+#define TYPE_FLOAT32 RawImageType::F32
+#define TYPE_USHORT16 RawImageType::UINT16
+
 #include <memory>
 
 #define __STDC_LIMIT_MACROS
@@ -34,6 +37,7 @@ extern "C" {
 #include "common/imageio_rawspeed.h"
 #include "imageio.h"
 #include "common/tags.h"
+#include "develop/imageop.h"
 #include <stdint.h>
 }
 
@@ -52,7 +56,8 @@ using namespace rawspeed;
 static dt_imageio_retval_t dt_imageio_open_rawspeed_sraw (dt_image_t *img, RawImage r, dt_mipmap_buffer_t *buf);
 static CameraMetaData *meta = NULL;
 
-static void dt_rawspeed_load_meta() {
+static void dt_rawspeed_load_meta()
+{
   /* Load rawspeed cameras.xml meta file once */
   if(meta == NULL)
   {
@@ -69,18 +74,18 @@ static void dt_rawspeed_load_meta() {
   }
 }
 
-void dt_rawspeed_lookup_makermodel(const char *maker, const char *model,
+gboolean dt_rawspeed_lookup_makermodel(const char *maker, const char *model,
                                    char *mk, int mk_len, char *md, int md_len,
                                    char *al, int al_len)
 {
-  int got_it_done = FALSE;
+  gboolean got_it_done = FALSE;
   try {
     dt_rawspeed_load_meta();
     const Camera *cam = meta->getCamera(maker, model, "");
     // Also look for dng cameras
-    if (!cam)
+    if(!cam)
       cam = meta->getCamera(maker, model, "dng");
-    if (cam)
+    if(cam)
     {
       g_strlcpy(mk, cam->canonical_make.c_str(), mk_len);
       g_strlcpy(md, cam->canonical_model.c_str(), md_len);
@@ -90,10 +95,10 @@ void dt_rawspeed_lookup_makermodel(const char *maker, const char *model,
   }
   catch(const std::exception &exc)
   {
-    printf("[rawspeed] %s\n", exc.what());
+    fprintf(stderr, "[rawspeed] %s\n", exc.what());
   }
 
-  if (!got_it_done)
+  if(!got_it_done)
   {
     // We couldn't find the camera or caught some exception, just punt and pass
     // through the same values
@@ -101,6 +106,7 @@ void dt_rawspeed_lookup_makermodel(const char *maker, const char *model,
     g_strlcpy(md, model, md_len);
     g_strlcpy(al, model, al_len);
   }
+  return got_it_done;
 }
 
 uint32_t dt_rawspeed_crop_dcraw_filters(uint32_t filters, uint32_t crop_x, uint32_t crop_y)
@@ -110,9 +116,27 @@ uint32_t dt_rawspeed_crop_dcraw_filters(uint32_t filters, uint32_t crop_x, uint3
   return ColorFilterArray::shiftDcrawFilter(filters, crop_x, crop_y);
 }
 
+// CR3 files are for now handled by LibRAW, we do not want rawspeed to try to open them
+// as this issues lot of error message on the console.
+static gboolean _ignore_image(const gchar *filename)
+{
+  const char *extensions_whitelist[] = { "cr3", NULL };
+  char *ext = g_strrstr(filename, ".");
+  if(!ext) return FALSE;
+  ext++;
+  for(const char **i = extensions_whitelist; *i != NULL; i++)
+    if(!g_ascii_strncasecmp(ext, *i, strlen(*i)))
+    {
+      return TRUE;
+    }
+  return FALSE;
+}
+
 dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filename,
                                              dt_mipmap_buffer_t *mbuf)
 {
+  if(_ignore_image(filename)) return DT_IMAGEIO_FILE_CORRUPTED;
+
   if(!img->exif_inited) (void)dt_exif_read(img, filename);
 
   char filen[PATH_MAX] = { 0 };
@@ -130,7 +154,7 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filena
     m = f.readFile();
     dt_pthread_mutex_unlock(&darktable.readFile_mutex);
 
-    RawParser t(m.get());
+    RawParser t(*m.get());
     d = t.getDecoder(meta);
 
     if(!d.get()) return DT_IMAGEIO_FILE_CORRUPTED;
@@ -142,7 +166,8 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filena
     RawImage r = d->mRaw;
 
     const auto errors = r->getErrors();
-    for(const auto &error : errors) fprintf(stderr, "[rawspeed] (%s) %s\n", img->filename, error.c_str());
+    for(const auto &error : errors)
+      fprintf(stderr, "[rawspeed] (%s) %s\n", img->filename, error.c_str());
 
     g_strlcpy(img->camera_maker, r->metadata.canonical_make.c_str(), sizeof(img->camera_maker));
     g_strlcpy(img->camera_model, r->metadata.canonical_model.c_str(), sizeof(img->camera_model));
@@ -186,7 +211,8 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filena
     };
 
     for(uint32_t i = 0; i < (sizeof(legacy_aliases) / sizeof(legacy_aliases[1])); i++)
-      if (!strcmp(legacy_aliases[i].origname, r->metadata.model.c_str())) {
+      if(!strcmp(legacy_aliases[i].origname, r->metadata.model.c_str()))
+      {
         g_strlcpy(img->camera_legacy_makermodel, legacy_aliases[i].mungedname, sizeof(img->camera_legacy_makermodel));
         break;
       }
@@ -194,13 +220,16 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filena
     img->raw_black_level = r->blackLevel;
     img->raw_white_point = r->whitePoint;
 
-    if(r->blackLevelSeparate[0] == -1 || r->blackLevelSeparate[1] == -1 || r->blackLevelSeparate[2] == -1
+    if(r->blackLevelSeparate[0] == -1
+       || r->blackLevelSeparate[1] == -1
+       || r->blackLevelSeparate[2] == -1
        || r->blackLevelSeparate[3] == -1)
     {
       r->calculateBlackAreas();
     }
 
-    for(uint8_t i = 0; i < 4; i++) img->raw_black_level_separate[i] = r->blackLevelSeparate[i];
+    for(uint8_t i = 0; i < 4; i++)
+      img->raw_black_level_separate[i] = r->blackLevelSeparate[i];
 
     if(r->blackLevel == -1)
     {
@@ -225,26 +254,55 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filena
     m.reset();
 
     // Grab the WB
-    for(int i = 0; i < 4; i++) img->wb_coeffs[i] = r->metadata.wbCoeffs[i];
+    for(int i = 0; i < 4; i++)
+      img->wb_coeffs[i] = r->metadata.wbCoeffs[i];
+
+    const int msize = r->metadata.colorMatrix.size();
+    // Grab the adobe coeff
+    for(int k = 0; k < 4; k++)
+      for(int i = 0; i < 3; i++)
+      {
+        const int idx = k*3 + i;
+        if(idx < msize)
+          img->adobe_XYZ_to_CAM[k][i] =
+            (float)r->metadata.colorMatrix[idx] / (float)ADOBE_COEFF_FACTOR;
+        else
+          img->adobe_XYZ_to_CAM[k][i] = 0.0f;
+      }
+
+    // FIXME: grab r->metadata.colorMatrix.
 
     // Get DefaultUserCrop
     if (img->flags & DT_IMAGE_HAS_USERCROP)
-      dt_img_check_usercrop(img, filename);
+      dt_exif_img_check_usercrop(img, filename);
+
+    if(r->getDataType() == TYPE_FLOAT32)
+    {
+      img->flags |= DT_IMAGE_HDR;
+
+      // we assume that image is normalized before.
+      // FIXME: not true for hdrmerge DNG's.
+      for(int k = 0; k < 4; k++) img->buf_dsc.processed_maximum[k] = 1.0f;
+    }
 
     img->buf_dsc.filters = 0u;
     if(!r->isCFA)
     {
-      dt_imageio_retval_t ret = dt_imageio_open_rawspeed_sraw(img, r, mbuf);
+      const dt_imageio_retval_t ret = dt_imageio_open_rawspeed_sraw(img, r, mbuf);
       return ret;
     }
 
-    if((r->getDataType() != TYPE_USHORT16) && (r->getDataType() != TYPE_FLOAT32)) return DT_IMAGEIO_FILE_CORRUPTED;
+    if((r->getDataType() != TYPE_USHORT16) && (r->getDataType() != TYPE_FLOAT32))
+      return DT_IMAGEIO_FILE_CORRUPTED;
 
-    if((r->getBpp() != sizeof(uint16_t)) && (r->getBpp() != sizeof(float))) return DT_IMAGEIO_FILE_CORRUPTED;
+    if((r->getBpp() != sizeof(uint16_t)) && (r->getBpp() != sizeof(float)))
+      return DT_IMAGEIO_FILE_CORRUPTED;
 
-    if((r->getDataType() == TYPE_USHORT16) && (r->getBpp() != sizeof(uint16_t))) return DT_IMAGEIO_FILE_CORRUPTED;
+    if((r->getDataType() == TYPE_USHORT16) && (r->getBpp() != sizeof(uint16_t)))
+      return DT_IMAGEIO_FILE_CORRUPTED;
 
-    if((r->getDataType() == TYPE_FLOAT32) && (r->getBpp() != sizeof(float))) return DT_IMAGEIO_FILE_CORRUPTED;
+    if((r->getDataType() == TYPE_FLOAT32) && (r->getBpp() != sizeof(float)))
+      return DT_IMAGEIO_FILE_CORRUPTED;
 
     const float cpp = r->getCpp();
     if(cpp != 1) return DT_IMAGEIO_FILE_CORRUPTED;
@@ -294,14 +352,6 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filena
     {
       img->flags &= ~DT_IMAGE_LDR;
       img->flags |= DT_IMAGE_RAW;
-      if(r->getDataType() == TYPE_FLOAT32)
-      {
-        img->flags |= DT_IMAGE_HDR;
-
-        // we assume that image is normalized before.
-        // FIXME: not true for hdrmerge DNG's.
-        for(int k = 0; k < 4; k++) img->buf_dsc.processed_maximum[k] = 1.0f;
-      }
 
       // special handling for x-trans sensors
       if(img->buf_dsc.filters == 9u)
@@ -315,12 +365,17 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filena
         for(int i = 0; i < 6; ++i)
           for(int j = 0; j < 6; ++j)
           {
-            img->buf_dsc.xtrans[j][i] = r->cfa.getColorAt(i % 6, j % 6);
+            img->buf_dsc.xtrans[j][i] = (uint8_t)r->cfa.getColorAt(i % 6, j % 6);
           }
       }
     }
     // if buf is NULL, we quit the fct here
-    if(!mbuf) return DT_IMAGEIO_OK;
+    if(!mbuf)
+    {
+      img->buf_dsc.cst = IOP_CS_RAW;
+      img->loader = LOADER_RAWSPEED;
+      return DT_IMAGEIO_OK;
+    }
 
     void *buf = dt_mipmap_cache_alloc(mbuf, img);
     if(!buf) return DT_IMAGEIO_CACHE_FULL;
@@ -344,10 +399,18 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filena
       dt_imageio_flip_buffers((char *)buf, (char *)r->getDataUncropped(0, 0), r->getBpp(), dimUncropped.x,
                               dimUncropped.y, dimUncropped.x, dimUncropped.y, r->pitch, ORIENTATION_NONE);
     }
+
+    //  Check if the camera is missing samples
+    const Camera *cam = meta->getCamera(r->metadata.make.c_str(),
+                                        r->metadata.model.c_str(),
+                                        r->metadata.mode.c_str());
+
+    if(cam && cam->supportStatus == Camera::SupportStatus::NoSamples)
+      img->camera_missing_sample = TRUE;
   }
   catch(const std::exception &exc)
   {
-    printf("[rawspeed] (%s) %s\n", img->filename, exc.what());
+    fprintf(stderr, "[rawspeed] (%s) %s\n", img->filename, exc.what());
 
     /* if an exception is raised lets not retry or handle the
      specific ones, consider the file as corrupted */
@@ -355,9 +418,12 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filena
   }
   catch(...)
   {
-    printf("Unhandled exception in imageio_rawspeed\n");
+    fprintf(stderr, "[rawspeed] unhandled exception in imageio_rawspeed\n");
     return DT_IMAGEIO_FILE_CORRUPTED;
   }
+
+  img->buf_dsc.cst = IOP_CS_RAW;
+  img->loader = LOADER_RAWSPEED;
 
   return DT_IMAGEIO_OK;
 }
@@ -375,82 +441,128 @@ dt_imageio_retval_t dt_imageio_open_rawspeed_sraw(dt_image_t *img, RawImage r, d
   img->buf_dsc.channels = 4;
   img->buf_dsc.datatype = TYPE_FLOAT;
 
-  if(r->getDataType() != TYPE_USHORT16) return DT_IMAGEIO_FILE_CORRUPTED;
+  if(r->getDataType() != TYPE_USHORT16 && r->getDataType() != TYPE_FLOAT32)
+    return DT_IMAGEIO_FILE_CORRUPTED;
 
   const uint32_t cpp = r->getCpp();
   if(cpp != 1 && cpp != 3 && cpp != 4) return DT_IMAGEIO_FILE_CORRUPTED;
 
   // if buf is NULL, we quit the fct here
-  if(!mbuf) return DT_IMAGEIO_OK;
+  if(!mbuf)
+  {
+    img->buf_dsc.cst = IOP_CS_RAW;
+    img->loader = LOADER_RAWSPEED;
+    return DT_IMAGEIO_OK;
+  }
 
-  // We test for monochrome before allocating the mipmap cache
-  // We set the flag and add the tag only once.
-  if((cpp == 1) && !(img->flags & DT_IMAGE_MONOCHROME))
-    {
-      guint tagid = 0;
-      char tagname[64];
-      snprintf(tagname, sizeof(tagname), "darktable|mode|monochrome");
-      dt_tag_new(tagname, &tagid);
-      dt_tag_attach(tagid, img->id, FALSE, FALSE);
-      img->flags |= DT_IMAGE_MONOCHROME;
-    }
+  if(cpp == 1) img->flags |= DT_IMAGE_MONOCHROME;
+
   void *buf = dt_mipmap_cache_alloc(mbuf, img);
   if(!buf) return DT_IMAGEIO_CACHE_FULL;
 
   if(cpp == 1)
   {
-/*
- * monochrome image (e.g. Leica M9 monochrom),
- * we need to copy data from only channel to each of 3 channels
- */
+    /*
+     * monochrome image (e.g. Leica M9 monochrom),
+     * we need to copy data from only channel to each of 3 channels
+     */
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-    schedule(static) \
-    dt_omp_firstprivate(cpp) \
-    shared(r, img, buf)
-#endif
-    for(int j = 0; j < img->height; j++)
+    if(r->getDataType() == TYPE_USHORT16)
     {
-      const uint16_t *in = (uint16_t *) r->getData(0, j);
-      float *out = ((float *)buf) + (size_t)4 * j * img->width;
-
-      for(int i = 0; i < img->width; i++, in += cpp, out += 4)
+#ifdef _OPENMP
+#pragma omp parallel for default(none) schedule(static) dt_omp_firstprivate(cpp) shared(r, img, buf)
+#endif
+      for(int j = 0; j < img->height; j++)
       {
-        for(int k = 0; k < 3; k++)
+        const uint16_t *in = (uint16_t *)r->getData(0, j);
+        float *out = ((float *)buf) + (size_t)4 * j * img->width;
+
+        for(int i = 0; i < img->width; i++, in += cpp, out += 4)
         {
-          out[k] = (float)*in / (float)UINT16_MAX;
+          for(int k = 0; k < 3; k++)
+          {
+            out[k] = (float)*in / (float)UINT16_MAX;
+          }
+        }
+      }
+    }
+    else // r->getDataType() == TYPE_FLOAT32
+    {
+#ifdef _OPENMP
+#pragma omp parallel for default(none) schedule(static) dt_omp_firstprivate(cpp) shared(r, img, buf)
+#endif
+      for(int j = 0; j < img->height; j++)
+      {
+        const float *in = (float *)r->getData(0, j);
+        float *out = ((float *)buf) + (size_t)4 * j * img->width;
+
+        for(int i = 0; i < img->width; i++, in += cpp, out += 4)
+        {
+          for(int k = 0; k < 3; k++)
+          {
+            out[k] = *in;
+          }
         }
       }
     }
   }
   else // case cpp == 3 or 4
   {
-/*
- * standard 3-ch image
- * just copy 3 ch to 3 ch
- */
+    /*
+     * standard 3-ch image
+     * just copy 3 ch to 3 ch
+     */
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-    schedule(static) \
-    dt_omp_firstprivate(cpp) \
-    shared(r, img, buf)
-#endif
-    for(int j = 0; j < img->height; j++)
+    if(r->getDataType() == TYPE_USHORT16)
     {
-      const uint16_t *in = (uint16_t *) r->getData(0, j);
-      float *out = ((float *)buf) + (size_t)4 * j * img->width;
-
-      for(int i = 0; i < img->width; i++, in += cpp, out += 4)
+#ifdef _OPENMP
+#pragma omp parallel for default(none) schedule(static) dt_omp_firstprivate(cpp) shared(r, img, buf)
+#endif
+      for(int j = 0; j < img->height; j++)
       {
-        for(int k = 0; k < 3; k++)
+        const uint16_t *in = (uint16_t *)r->getData(0, j);
+        float *out = ((float *)buf) + (size_t)4 * j * img->width;
+
+        for(int i = 0; i < img->width; i++, in += cpp, out += 4)
         {
-          out[k] = (float)in[k] / (float)UINT16_MAX;
+          for(int k = 0; k < 3; k++)
+          {
+            out[k] = (float)in[k] / (float)UINT16_MAX;
+          }
+        }
+      }
+    }
+    else // r->getDataType() == TYPE_FLOAT32
+    {
+#ifdef _OPENMP
+#pragma omp parallel for default(none) schedule(static) dt_omp_firstprivate(cpp) shared(r, img, buf)
+#endif
+      for(int j = 0; j < img->height; j++)
+      {
+        const float *in = (float *)r->getData(0, j);
+        float *out = ((float *)buf) + (size_t)4 * j * img->width;
+
+        for(int i = 0; i < img->width; i++, in += cpp, out += 4)
+        {
+          for(int k = 0; k < 3; k++)
+          {
+            out[k] = in[k];
+          }
         }
       }
     }
   }
+
+  img->buf_dsc.cst = IOP_CS_RAW;
+  img->loader = LOADER_RAWSPEED;
+
+  //  Check if the camera is missing samples
+  const Camera *cam = meta->getCamera(r->metadata.make.c_str(),
+                                      r->metadata.model.c_str(),
+                                      r->metadata.mode.c_str());
+
+  if(cam && cam->supportStatus == Camera::SupportStatus::NoSamples)
+    img->camera_missing_sample = TRUE;
 
   return DT_IMAGEIO_OK;
 }

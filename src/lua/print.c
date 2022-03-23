@@ -1,7 +1,7 @@
 
 /*
    This file is part of darktable,
-   copyright (c) 2012 Jeremy Rosen
+   Copyright (C) 2013-2020 darktable developers.
 
    darktable is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -31,6 +31,37 @@ static int lua_print(lua_State *L)
   return 0;
 }
 
+static int lua_print_toast(lua_State *L)
+{
+
+  const int init_gui = (darktable.gui != NULL);
+  if(init_gui)
+    dt_toast_log("%s", luaL_checkstring(L, -1));
+  else
+    printf("%s\n", luaL_checkstring(L, -1));
+
+  return 0;
+}
+
+static int lua_print_hinter(lua_State *L)
+{
+
+  const int init_gui = (darktable.gui != NULL);
+  if(init_gui)
+  {
+
+    char msg[256];
+    if(snprintf(msg, sizeof(msg), "%s", luaL_checkstring(L, -1)) > 0)
+    {
+      dt_control_hinter_message(darktable.control, msg);
+    }
+  }
+  else
+    printf("%s\n", luaL_checkstring(L, -1));
+
+  return 0;
+}
+
 
 static int lua_print_log(lua_State *L)
 {
@@ -50,6 +81,14 @@ int dt_lua_init_print(lua_State *L)
 
   lua_pushstring(L, "print");
   lua_pushcfunction(L, &lua_print);
+  lua_settable(L, -3);
+
+  lua_pushstring(L, "print_toast");
+  lua_pushcfunction(L, &lua_print_toast);
+  lua_settable(L, -3);
+
+  lua_pushstring(L, "print_hinter");
+  lua_pushcfunction(L, &lua_print_hinter);
   lua_settable(L, -3);
 
   lua_pushstring(L, "print_log");

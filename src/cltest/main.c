@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2011 johannes hanika.
+    Copyright (C) 2011-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -37,7 +37,7 @@ int main(int argc, char *arg[])
   // only used to force-init opencl, so we want these options:
   char *m_arg[] = { "-d", "opencl", "--library", ":memory:"};
   const int m_argc = sizeof(m_arg) / sizeof(m_arg[0]);
-  char **argv = malloc(argc * sizeof(arg[0]) + sizeof(m_arg));
+  char **argv = malloc(sizeof(arg[0]) * argc + sizeof(m_arg));
   if(!argv) goto end;
   for(int i = 0; i < argc; i++)
     argv[i] = arg[i];

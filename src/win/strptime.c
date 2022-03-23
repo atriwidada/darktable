@@ -1,7 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2012 johannes hanika.
-    copyright (c) 2010--2012 tobias ellinghaus.
+    Copyright (C) 2017-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -390,15 +389,15 @@ char *strptime(const char *buf, const char *fmt, struct tm *tm)
         }
         else
         {
-          ep = find_string(bp, &i, (const char *const *)tzname, NULL, 2);
+          ep = find_string(bp, &i, (const char *const *)_tzname, NULL, 2);
           if(ep != NULL)
           {
             tm->tm_isdst = i;
 #ifdef TM_GMTOFF
-            tm->TM_GMTOFF = -(timezone);
+            tm->TM_GMTOFF = -(_timezone);
 #endif
 #ifdef TM_ZONE
-            tm->TM_ZONE = tzname[i];
+            tm->TM_ZONE = _tzname[i];
 #endif
           }
           bp = ep;

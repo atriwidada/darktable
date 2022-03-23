@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2010 Henrik Andersson.
+    Copyright (C) 2009-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -124,7 +124,7 @@ int read_image(dt_imageio_png_t *png, void *out)
     return 1;
   }
 
-  png_bytep *row_pointers = malloc((size_t)png->height * sizeof(png_bytep));
+  png_bytep *row_pointers = malloc(sizeof(png_bytep) * png->height);
 
   png_bytep row_pointer = (png_bytep)out;
   const size_t rowbytes = png_get_rowbytes(png->png_ptr, png->info_ptr);
@@ -208,6 +208,7 @@ dt_imageio_retval_t dt_imageio_open_png(dt_image_t *img, const char *filename, d
   }
 
   dt_free_align(buf);
+  img->loader = LOADER_PNG;
   return DT_IMAGEIO_OK;
 }
 
@@ -232,7 +233,7 @@ int dt_imageio_png_read_profile(const char *filename, uint8_t **out)
   if(png_get_valid(image.png_ptr, image.info_ptr, PNG_INFO_iCCP) != 0
      && png_get_iCCP(image.png_ptr, image.info_ptr, &name, &compression_type, &profile, &proflen) != 0)
   {
-    *out = (uint8_t *)malloc(proflen);
+    *out = (uint8_t *)g_malloc(proflen);
     memcpy(*out, profile, proflen);
   }
   else

@@ -55,7 +55,7 @@ denoiseprofile_precondition(read_only image2d_t in, write_only image2d_t out, co
   float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
   const float alpha = pixel.w;
 
-  float4 t = pixel / a;
+  float4 t = fmax(pixel / a, 0.f);
   float4 d = fmax((float4)0.0f, t + (float4)0.375f + sigma2);
   float4 s = 2.0f*sqrt(d);
 
@@ -77,11 +77,41 @@ denoiseprofile_precondition_v2(read_only image2d_t in, write_only image2d_t out,
   float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
   const float alpha = pixel.w;
 
-  float4 t = 2.0f * native_powr(fmax((float4)0.0f, pixel / wb + b), 1.0f - p / 2.0f) / ((-p + 2.0f) * sqrt(a));
+  float4 t = fmax(2.0f * native_powr(fmax((float4)0.0f, pixel / wb + b), 1.0f - p / 2.0f) / ((-p + 2.0f) * sqrt(a)), 0.f);
 
   t.w = alpha;
 
   write_imagef (out, (int2)(x, y), t);
+}
+
+kernel void
+denoiseprofile_precondition_Y0U0V0(read_only image2d_t in, write_only image2d_t out, const int width, const int height,
+                             const float4 a, const float4 p, const float4 b, global float *toY0U0V0)
+{
+  const int x = get_global_id(0);
+  const int y = get_global_id(1);
+
+  if(x >= width || y >= height) return;
+
+  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  const float alpha = pixel.w;
+
+  const float4 t = fmax(2.0f * native_powr(fmax((float4)0.0f, pixel + b), 1.0f - p / 2.0f) / ((-p + 2.0f) * sqrt(a)), 0.f);
+
+  float4 outpx = (float4)0.0f;
+  outpx.x += toY0U0V0[0] * t.x;
+  outpx.x += toY0U0V0[1] * t.y;
+  outpx.x += toY0U0V0[2] * t.z;
+  outpx.y += toY0U0V0[3] * t.x;
+  outpx.y += toY0U0V0[4] * t.y;
+  outpx.y += toY0U0V0[5] * t.z;
+  outpx.z += toY0U0V0[6] * t.x;
+  outpx.z += toY0U0V0[7] * t.y;
+  outpx.z += toY0U0V0[8] * t.z;
+
+  outpx.w = alpha;
+
+  write_imagef (out, (int2)(x, y), outpx);
 }
 
 
@@ -327,7 +357,7 @@ denoiseprofile_finish_v2(read_only image2d_t in, global float4* U2, write_only i
   float4 delta = px * px + (float4)bias;
   float4 denominator = 4.0f / (sqrt(a) * (2.0f - p));
   float4 z1 = (px + sqrt(fmax((float4)0.0f, delta))) / denominator;
-  px = native_powr(z1, 1.0f / (1.0f - p / 2.0f)) - b;
+  px = fmax(native_powr(z1, 1.0f / (1.0f - p / 2.0f)) - b, 0.f);
   px = px * wb;
   px.w = alpha;
 
@@ -373,11 +403,45 @@ denoiseprofile_backtransform_v2(read_only image2d_t in, write_only image2d_t out
   const float alpha = px.w;
 
   px = fmax((float4)0.0f, px);
-  float4 delta = px * px + (float4)bias;
-  float4 denominator = 4.0f / (sqrt(a) * (2.0f - p));
-  float4 z1 = (px + sqrt(fmax((float4)0.0f, delta))) / denominator;
-  px = native_powr(z1, 1.0f / (1.0f - p / 2.0f)) - b;
+  const float4 delta = px * px + (float4)bias;
+  const float4 denominator = 4.0f / (sqrt(a) * (2.0f - p));
+  const float4 z1 = (px + sqrt(fmax((float4)0.0f, delta))) / denominator;
+  px = fmax(native_powr(z1, 1.0f / (1.0f - p / 2.0f)) - b, 0.f);
   px = px * wb;
+  px.w = alpha;
+
+  write_imagef (out, (int2)(x, y), px);
+}
+
+kernel void
+denoiseprofile_backtransform_Y0U0V0(read_only image2d_t in, write_only image2d_t out, const int width, const int height,
+                             const float4 a, const float4 p, const float4 b, const float bias, const float4 wb, global float *toRGB)
+{
+  const int x = get_global_id(0);
+  const int y = get_global_id(1);
+  const int gidx = mad24(y, width, x);
+
+  if(x >= width || y >= height) return;
+
+  const float4 t = read_imagef(in, sampleri, (int2)(x, y));
+  const float alpha = t.w;
+
+  float4 px = (float4)0.0f;
+  px.x += toRGB[0] * t.x;
+  px.x += toRGB[1] * t.y;
+  px.x += toRGB[2] * t.z;
+  px.y += toRGB[3] * t.x;
+  px.y += toRGB[4] * t.y;
+  px.y += toRGB[5] * t.z;
+  px.z += toRGB[6] * t.x;
+  px.z += toRGB[7] * t.y;
+  px.z += toRGB[8] * t.z;
+
+  px = fmax((float4)0.0f, px);
+  const float4 delta = px * px + (float4)bias * wb;
+  const float4 denominator = 4.0f / (sqrt(a) * (2.0f - p));
+  const float4 z1 = (px + sqrt(fmax((float4)0.0f, delta))) / denominator;
+  px = fmax(native_powr(z1, 1.0f / (1.0f - p / 2.0f)) - b, 0.f);
   px.w = alpha;
 
   write_imagef (out, (int2)(x, y), px);

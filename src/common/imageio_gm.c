@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2012--2013 Ulrich Pegelow.
+    Copyright (C) 2012-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -80,7 +80,14 @@ dt_imageio_retval_t dt_imageio_open_gm(dt_image_t *img, const char *filename, dt
     goto error;
   }
 
-  fprintf(stderr, "[GraphicsMagick_open] image `%s' loading\n", img->filename);
+  dt_print(DT_DEBUG_IMAGEIO, "[GraphicsMagick_open] image `%s' loading\n", img->filename);
+
+  if(IsCMYKColorspace(image->colorspace))
+  {
+    fprintf(stderr, "[GraphicsMagick_open] error: CMYK images are not supported.\n");
+    err =  DT_IMAGEIO_FILE_CORRUPTED;
+    goto error;
+  }
 
   width = image->columns;
   height = image->rows;
@@ -122,6 +129,7 @@ dt_imageio_retval_t dt_imageio_open_gm(dt_image_t *img, const char *filename, dt
   img->flags &= ~DT_IMAGE_S_RAW;
   img->flags |= DT_IMAGE_LDR;
 
+  img->loader = LOADER_GM;
   return DT_IMAGEIO_OK;
 
 error:

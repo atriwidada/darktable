@@ -1,8 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2010 johannes hanika.
-    copyright (c) 2011 henrik andersson.
-    copyright (c) 2014 LebedevRI.
+    Copyright (C) 2010-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -30,7 +28,8 @@ DT_MODULE(1)
 
 int write_image(dt_imageio_module_data_t *data, const char *filename, const void *ivoid,
                 dt_colorspaces_color_profile_type_t over_type, const char *over_filename,
-                void *exif, int exif_len, int imgid, int num, int total, struct dt_dev_pixelpipe_t *pipe)
+                void *exif, int exif_len, int imgid, int num, int total, struct dt_dev_pixelpipe_t *pipe,
+                const gboolean export_masks)
 {
   const dt_imageio_module_data_t *const pfm = data;
   int status = 0;
@@ -47,7 +46,7 @@ int write_image(dt_imageio_module_data_t *data, const char *filename, const void
     while((len + 1 + off) & 0xf) off++;
     while(off-- > 0) fprintf(f, "0");
     fprintf(f, "\n");
-    void *buf_line = dt_alloc_align(64, 3 * sizeof(float) * pfm->width);
+    void *buf_line = dt_alloc_align_float((size_t)3 * pfm->width);
     for(int j = 0; j < pfm->height; j++)
     {
       // NOTE: pfm has rows in reverse order
@@ -56,10 +55,10 @@ int write_image(dt_imageio_module_data_t *data, const char *filename, const void
       float *out = (float *)buf_line;
       for(int i = 0; i < pfm->width; i++, in += 4, out += 3)
       {
-        memcpy(out, in, 3 * sizeof(float));
+        memcpy(out, in, sizeof(float) * 3);
       }
       // INFO: per-line fwrite call seems to perform best. LebedevRI, 18.04.2014
-      int cnt = fwrite(buf_line, 3 * sizeof(float), pfm->width, f);
+      int cnt = fwrite(buf_line, sizeof(float) * 3, pfm->width, f);
       if(cnt != pfm->width)
         status = 1;
       else

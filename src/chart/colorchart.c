@@ -1,6 +1,6 @@
 /*
  *    This file is part of darktable,
- *    copyright (c) 2016 tobias ellinghaus.
+ *    Copyright (C) 2016-2021 darktable developers.
  *
  *    darktable is free software: you can redistribute it and/or modify
  *    it under the terms of the GNU General Public License as published by
@@ -99,15 +99,15 @@ static int strinc(char *label, size_t buffer_size)
   return 1;
 }
 
-void set_color(box_t *box, dt_colorspaces_color_profile_type_t color_space, float c0, float c1, float c2)
+void checker_set_color(box_t *box, dt_colorspaces_color_profile_type_t color_space, float c0, float c1, float c2)
 {
   box->color_space = color_space;
   box->color[0] = c0;
   box->color[1] = c1;
   box->color[2] = c2;
 
-  float Lab[3] = { c0, c1, c2 };
-  float XYZ[3] = { c0 * 0.01, c1 * 0.01, c2 * 0.01 };
+  dt_aligned_pixel_t Lab = { c0, c1, c2 };
+  dt_aligned_pixel_t XYZ = { c0 * 0.01, c1 * 0.01, c2 * 0.01 };
 
   switch(color_space)
   {
@@ -298,8 +298,8 @@ chart_t *parse_cht(const char *filename)
           const size_t x_label_size = lxe_len + 1;
           const size_t y_label_size = lye_len + 1;
 
-          char *x_label = malloc(x_label_size * sizeof(char));
-          char *y_label = malloc(y_label_size * sizeof(char));
+          char *x_label = malloc(x_label_size);
+          char *y_label = malloc(y_label_size);
 
           char *first_label = NULL, *last_label = NULL;
           GList *labels = NULL;
@@ -327,10 +327,11 @@ chart_t *parse_cht(const char *filename)
               }
 
               if(!first_label) first_label = label;
+              g_free(last_label);
               last_label = label;
 
               // store it
-              box_t *box = (box_t *)calloc(1, sizeof(box_t));
+              box_t *box = calloc(1, sizeof(box_t));
               box->p.x = x;
               box->p.y = y;
               box->w = w;
@@ -346,19 +347,30 @@ chart_t *parse_cht(const char *filename)
               if(!g_strcmp0(x_label, lxe)) break;
               x += xi;
               x_steps++;
-              if(!strinc(x_label, x_label_size)) ERROR;
+              if(!strinc(x_label, x_label_size))
+              {
+                free(y_label);
+                free(x_label);
+                ERROR;
+              }
             }
             x_max = MAX(x_max, x + w);
             // increment in y direction
             if(!g_strcmp0(y_label, lye)) break;
             y += yi;
             y_steps++;
-            if(!strinc(y_label, y_label_size)) ERROR;
+            if(!strinc(y_label, y_label_size))
+            {
+              free(y_label);
+              free(x_label);
+              ERROR;
+            }
           }
           y_max = MAX(y_max, y + h);
           if(kl == 'X' || kl == 'Y')
             g_hash_table_insert(result->patch_sets, g_strdup_printf("%s .. %s", first_label, last_label), labels);
 
+          g_free(last_label);
           free(y_label);
           free(x_label);
         }
@@ -378,8 +390,7 @@ chart_t *parse_cht(const char *filename)
 #define SCALE_X(x) x = (x - x_min) / result->bb_w
 #define SCALE_Y(y) y = (y - y_min) / result->bb_h
 
-      GList *iter = result->f_list;
-      while(iter)
+      for(GList *iter = result->f_list; iter; iter = g_list_next(iter))
       {
         f_line_t *f = iter->data;
         for(int i = 0; i < 4; i++)
@@ -387,7 +398,6 @@ chart_t *parse_cht(const char *filename)
           SCALE_X(f->p[i].x);
           SCALE_Y(f->p[i].y);
         }
-        iter = g_list_next(iter);
       }
 
       GHashTableIter table_iter;
@@ -477,7 +487,7 @@ chart_t *parse_cht(const char *filename)
         float c1 = parse_double(&c);
         if(c - line >= len) ERROR;
         float c2 = parse_double(&c);
-        set_color(box, color_space, c0, c1, c2);
+        checker_set_color(box, color_space, c0, c1, c2);
       }
       if(n_colors != 0) ERROR;
     }
@@ -589,7 +599,7 @@ int parse_it8(const char *filename, chart_t *chart)
       goto error;
     }
 
-    set_color(box, color_space, cmsIT8GetDataDbl(hIT8, key, columns[0]), cmsIT8GetDataDbl(hIT8, key, columns[1]),
+    checker_set_color(box, color_space, cmsIT8GetDataDbl(hIT8, key, columns[0]), cmsIT8GetDataDbl(hIT8, key, columns[1]),
               cmsIT8GetDataDbl(hIT8, key, columns[2]));
   }
 

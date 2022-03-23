@@ -1,6 +1,6 @@
 /*
    This file is part of darktable,
-   copyright (c) 2012 Jeremy Rosen
+   Copyright (C) 2013-2021 darktable developers.
 
    darktable is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -85,15 +85,15 @@ typedef union all_data_t
 } all_data_t;
 
 struct pref_element;
-typedef void (update_widget_function)(struct pref_element* ,GtkWidget* ,GtkWidget* );
-static void update_widget_enum(struct pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev);
-static void update_widget_dir(struct pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev);
-static void update_widget_file(struct pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev);
-static void update_widget_string(struct pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev);
-static void update_widget_bool(struct pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev);
-static void update_widget_int(struct pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev);
-static void update_widget_float(struct pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev);
-static void update_widget_lua(struct pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev);
+typedef void (update_widget_function)(struct pref_element* , GtkWidget* , GtkWidget* );
+static void update_widget_enum(struct pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev);
+static void update_widget_dir(struct pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev);
+static void update_widget_file(struct pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev);
+static void update_widget_string(struct pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev);
+static void update_widget_bool(struct pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev);
+static void update_widget_int(struct pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev);
+static void update_widget_float(struct pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev);
+static void update_widget_lua(struct pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev);
 
 typedef struct pref_element
 {
@@ -148,11 +148,32 @@ static void destroy_pref_element(pref_element *elt)
 
 static pref_element *pref_list = NULL;
 
+// get all the darktablerc keys
+static int get_keys(lua_State *L)
+{
+  dt_pthread_mutex_lock(&darktable.conf->mutex);
+  GList* keys = g_hash_table_get_keys(darktable.conf->table);
+  dt_pthread_mutex_unlock(&darktable.conf->mutex);
+
+  keys = g_list_sort(keys, (GCompareFunc) strcmp);
+  lua_newtable(L);
+  int table_index = 1;
+  for(const GList* key = keys; key; key = g_list_next(key))
+  {
+    lua_pushstring(L, key->data);
+    lua_seti(L, -2, table_index);
+    table_index++;
+  }
+  g_list_free(keys);
+  return 1;
+}
+
 static void get_pref_name(char *tgt, size_t size, const char *script, const char *name)
 {
   snprintf(tgt, size, "lua/%s/%s", script, name);
 }
 
+// read lua and darktable prefs
 static int read_pref(lua_State *L)
 {
   const char *script = luaL_checkstring(L, 1);
@@ -161,35 +182,34 @@ static int read_pref(lua_State *L)
   luaA_to(L, lua_pref_type, &i, 3);
 
   char pref_name[1024];
-  get_pref_name(pref_name, sizeof(pref_name), script, name);
+  if(strcmp(script, "darktable") != 0)
+    get_pref_name(pref_name, sizeof(pref_name), script, name);
+  else
+    snprintf(pref_name, sizeof(pref_name), "%s", name);
   switch(i)
   {
     case pref_enum:
     {
-      char *str = dt_conf_get_string(pref_name);
+      const char *str = dt_conf_get_string_const(pref_name);
       lua_pushstring(L, str);
-      g_free(str);
       break;
     }
     case pref_dir:
     {
-      char *str = dt_conf_get_string(pref_name);
+      const char *str = dt_conf_get_string_const(pref_name);
       lua_pushstring(L, str);
-      g_free(str);
       break;
     }
     case pref_file:
     {
-      char *str = dt_conf_get_string(pref_name);
+      const char *str = dt_conf_get_string_const(pref_name);
       lua_pushstring(L, str);
-      g_free(str);
       break;
     }
     case pref_string:
     {
-      char *str = dt_conf_get_string(pref_name);
+      const char *str = dt_conf_get_string_const(pref_name);
       lua_pushstring(L, str);
-      g_free(str);
       break;
     }
     case pref_bool:
@@ -203,15 +223,15 @@ static int read_pref(lua_State *L)
       break;
     case pref_lua:
     {
-      char *str = dt_conf_get_string(pref_name);
+      const char *str = dt_conf_get_string_const(pref_name);
       lua_pushstring(L, str);
-      g_free(str);
       break;
     }
   }
   return 1;
 }
 
+// write lua prefs
 static int write_pref(lua_State *L)
 {
   const char *script = luaL_checkstring(L, 1);
@@ -253,10 +273,25 @@ static int write_pref(lua_State *L)
   return 0;
 }
 
+// destroy lua prefs
+static int destroy_pref(lua_State *L)
+{
+  gboolean result;
+  const char *script = luaL_checkstring(L, 1);
+  const char *name = luaL_checkstring(L, 2);
+
+  char pref_name[1024];
+  get_pref_name(pref_name, sizeof(pref_name), script, name);
+  dt_pthread_mutex_lock(&darktable.conf->mutex);
+  result = g_hash_table_remove(darktable.conf->table, pref_name);
+  dt_pthread_mutex_unlock(&darktable.conf->mutex);
+  lua_pushboolean(L, result);
+  return 1;
+}
 
 static void response_callback_enum(GtkDialog *dialog, gint response_id, pref_element *cur_elt)
 {
-  if(response_id == GTK_RESPONSE_ACCEPT)
+  if(response_id == GTK_RESPONSE_DELETE_EVENT)
   {
     char pref_name[1024];
     get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -269,7 +304,7 @@ static void response_callback_enum(GtkDialog *dialog, gint response_id, pref_ele
 
 static void response_callback_dir(GtkDialog *dialog, gint response_id, pref_element *cur_elt)
 {
-  if(response_id == GTK_RESPONSE_ACCEPT)
+  if(response_id == GTK_RESPONSE_DELETE_EVENT)
   {
     char pref_name[1024];
     get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -282,18 +317,20 @@ static void response_callback_dir(GtkDialog *dialog, gint response_id, pref_elem
 
 static void response_callback_file(GtkDialog *dialog, gint response_id, pref_element *cur_elt)
 {
-  if(response_id == GTK_RESPONSE_ACCEPT)
+  if(response_id == GTK_RESPONSE_DELETE_EVENT)
   {
     char pref_name[1024];
     get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
-    dt_conf_set_string(pref_name, gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(cur_elt->widget)));
+    gchar *file = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(cur_elt->widget));
+    dt_conf_set_string(pref_name, file);
+    g_free(file);
   }
 }
 
 
 static void response_callback_string(GtkDialog *dialog, gint response_id, pref_element *cur_elt)
 {
-  if(response_id == GTK_RESPONSE_ACCEPT)
+  if(response_id == GTK_RESPONSE_DELETE_EVENT)
   {
     char pref_name[1024];
     get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -304,7 +341,7 @@ static void response_callback_string(GtkDialog *dialog, gint response_id, pref_e
 
 static void response_callback_bool(GtkDialog *dialog, gint response_id, pref_element *cur_elt)
 {
-  if(response_id == GTK_RESPONSE_ACCEPT)
+  if(response_id == GTK_RESPONSE_DELETE_EVENT)
   {
     char pref_name[1024];
     get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -315,7 +352,7 @@ static void response_callback_bool(GtkDialog *dialog, gint response_id, pref_ele
 
 static void response_callback_int(GtkDialog *dialog, gint response_id, pref_element *cur_elt)
 {
-  if(response_id == GTK_RESPONSE_ACCEPT)
+  if(response_id == GTK_RESPONSE_DELETE_EVENT)
   {
     char pref_name[1024];
     get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -326,7 +363,7 @@ static void response_callback_int(GtkDialog *dialog, gint response_id, pref_elem
 
 static void response_callback_float(GtkDialog *dialog, gint response_id, pref_element *cur_elt)
 {
-  if(response_id == GTK_RESPONSE_ACCEPT)
+  if(response_id == GTK_RESPONSE_DELETE_EVENT)
   {
     char pref_name[1024];
     get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -337,14 +374,14 @@ static void response_callback_float(GtkDialog *dialog, gint response_id, pref_el
 
 static void response_callback_lua(GtkDialog *dialog, gint response_id, pref_element *cur_elt)
 {
-  if(response_id == GTK_RESPONSE_ACCEPT)
+  if(response_id == GTK_RESPONSE_DELETE_EVENT)
   {
     dt_lua_lock_silent();
     lua_State * L = darktable.lua_state.state;
-    lua_pushcfunction(L,dt_lua_widget_trigger_callback);
-    luaA_push(L,lua_widget,&cur_elt->widget);
-    lua_pushstring(L,"set_pref");
-    lua_call(L,2,0);
+    lua_pushcfunction(L, dt_lua_widget_trigger_callback);
+    luaA_push(L, lua_widget, &cur_elt->widget);
+    lua_pushstring(L, "set_pref");
+    lua_call(L, 2, 0);
     dt_lua_unlock();
   }
 }
@@ -436,31 +473,32 @@ static gboolean reset_widget_lua(GtkWidget *label, GdkEventButton *event, pref_e
   {
     char pref_name[1024];
     get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
-    char *old_str = dt_conf_get_string(pref_name);
+    gchar *old_str = dt_conf_get_string(pref_name);
     dt_conf_set_string(pref_name, cur_elt->type_data.lua_data.default_value);
     dt_lua_lock_silent();
     lua_State * L = darktable.lua_state.state;
-    lua_pushcfunction(L,dt_lua_widget_trigger_callback);
-    luaA_push(L,lua_widget,&cur_elt->widget);
-    luaA_push(L,lua_widget,&cur_elt->widget);
-    lua_pushstring(L,"set_pref");
-    lua_call(L,3,0);
+    lua_pushcfunction(L, dt_lua_widget_trigger_callback);
+    luaA_push(L, lua_widget, &cur_elt->widget);
+    luaA_push(L, lua_widget, &cur_elt->widget);
+    lua_pushstring(L, "set_pref");
+    lua_call(L, 3, 0);
     dt_lua_unlock();
     dt_conf_set_string(pref_name, old_str);
+    g_free(old_str);
     return TRUE;
   }
   return FALSE;
 }
 
 
-static void update_widget_enum(pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev)
+static void update_widget_enum(pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev)
 {
   char pref_name[1024];
   get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
   g_signal_connect(G_OBJECT(labelev), "button-press-event", G_CALLBACK(reset_widget_enum), cur_elt);
   g_signal_connect(G_OBJECT(dialog), "response", G_CALLBACK(response_callback_enum), cur_elt);
   gtk_combo_box_set_active(GTK_COMBO_BOX(cur_elt->widget), 0);
-  char*value = dt_conf_get_string(pref_name);
+  const char *value = dt_conf_get_string_const(pref_name);
   do {
     char * active_entry = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(cur_elt->widget));
     if(!active_entry)
@@ -476,51 +514,47 @@ static void update_widget_enum(pref_element* cur_elt,GtkWidget* dialog,GtkWidget
     }
     else
     {
-      gtk_combo_box_set_active(GTK_COMBO_BOX(cur_elt->widget), gtk_combo_box_get_active(GTK_COMBO_BOX(cur_elt->widget))+1);
+      gtk_combo_box_set_active(GTK_COMBO_BOX(cur_elt->widget), gtk_combo_box_get_active(GTK_COMBO_BOX(cur_elt->widget)) + 1);
       g_free(active_entry);
     }
   } while(true);
-  g_free(value);
 }
 
 
-static void update_widget_dir(pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev)
+static void update_widget_dir(pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev)
 {
   char pref_name[1024];
   get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
-  gchar *str = dt_conf_get_string(pref_name);
+  const char *str = dt_conf_get_string_const(pref_name);
   gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(cur_elt->widget), str);
-  g_free(str);
   g_signal_connect(G_OBJECT(labelev), "button-press-event", G_CALLBACK(reset_widget_dir), cur_elt);
   g_signal_connect(G_OBJECT(dialog), "response", G_CALLBACK(response_callback_dir), cur_elt);
 }
 
 
-static void update_widget_file(pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev)
+static void update_widget_file(pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev)
 {
   char pref_name[1024];
   get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
-  gchar *str = dt_conf_get_string(pref_name);
+  const char *str = dt_conf_get_string_const(pref_name);
   gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(cur_elt->widget), str);
-  g_free(str);
   g_signal_connect(G_OBJECT(labelev), "button-press-event", G_CALLBACK(reset_widget_file), cur_elt);
   g_signal_connect(G_OBJECT(dialog), "response", G_CALLBACK(response_callback_file), cur_elt);
 }
 
 
-static void update_widget_string(pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev)
+static void update_widget_string(pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev)
 {
   char pref_name[1024];
   get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
   g_signal_connect(G_OBJECT(labelev), "button-press-event", G_CALLBACK(reset_widget_string), cur_elt);
   g_signal_connect(G_OBJECT(dialog), "response", G_CALLBACK(response_callback_string), cur_elt);
-  char* str = dt_conf_get_string(pref_name);
+  const char *str = dt_conf_get_string_const(pref_name);
   gtk_entry_set_text(GTK_ENTRY(cur_elt->widget), str);
-  g_free(str);
 }
 
 
-static void update_widget_bool(pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev)
+static void update_widget_bool(pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev)
 {
   char pref_name[1024];
   get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -530,7 +564,7 @@ static void update_widget_bool(pref_element* cur_elt,GtkWidget* dialog,GtkWidget
 }
 
 
-static void update_widget_int(pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev)
+static void update_widget_int(pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev)
 {
   char pref_name[1024];
   get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -540,7 +574,7 @@ static void update_widget_int(pref_element* cur_elt,GtkWidget* dialog,GtkWidget*
 }
 
 
-static void update_widget_float(pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev)
+static void update_widget_float(pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev)
 {
   char pref_name[1024];
   get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -550,14 +584,14 @@ static void update_widget_float(pref_element* cur_elt,GtkWidget* dialog,GtkWidge
 }
 
 
-static void update_widget_lua(pref_element* cur_elt,GtkWidget* dialog,GtkWidget* labelev)
+static void update_widget_lua(pref_element* cur_elt, GtkWidget* dialog, GtkWidget* labelev)
 {
   dt_lua_lock_silent();
   lua_State * L = darktable.lua_state.state;
-  lua_pushcfunction(L,dt_lua_widget_trigger_callback);
-  luaA_push(L,lua_widget,&cur_elt->widget);
-  lua_pushstring(L,"reset");
-  lua_call(L,2,0);
+  lua_pushcfunction(L, dt_lua_widget_trigger_callback);
+  luaA_push(L, lua_widget, &cur_elt->widget);
+  lua_pushstring(L, "reset");
+  lua_call(L, 2, 0);
   dt_lua_unlock();
   g_signal_connect(G_OBJECT(labelev), "button-press-event", G_CALLBACK(reset_widget_lua), cur_elt);
   g_signal_connect(G_OBJECT(dialog), "response", G_CALLBACK(response_callback_lua), cur_elt);
@@ -602,6 +636,8 @@ static int register_pref_sub(lua_State *L)
 
       int value = 0;
       built_elt->type_data.enum_data.default_value = strdup(luaL_checkstring(L, cur_param));
+      cur_param++;
+      
       while(!lua_isnoneornil(L, cur_param))
       {
         luaA_enum_value_type(L, enum_type, &value, luaL_checkstring(L, cur_param));
@@ -616,7 +652,7 @@ static int register_pref_sub(lua_State *L)
 
 
       g_object_ref_sink(G_OBJECT(built_elt->widget));
-      built_elt->tooltip_reset = g_strdup_printf(  _("double click to reset to `%s'"),
+      built_elt->tooltip_reset = g_strdup_printf(  _("double-click to reset to `%s'"),
           built_elt->type_data.enum_data.default_value);
       built_elt->update_widget = update_widget_enum;
       break;
@@ -631,7 +667,7 @@ static int register_pref_sub(lua_State *L)
       built_elt->widget = gtk_file_chooser_button_new(_("select directory"), GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER);
       gtk_file_chooser_button_set_width_chars(GTK_FILE_CHOOSER_BUTTON(built_elt->widget), 20);
       g_object_ref_sink(G_OBJECT(built_elt->widget));
-      built_elt->tooltip_reset = g_strdup_printf( _("double click to reset to `%s'"), built_elt->type_data.dir_data.default_value);
+      built_elt->tooltip_reset = g_strdup_printf( _("double-click to reset to `%s'"), built_elt->type_data.dir_data.default_value);
       built_elt->update_widget = update_widget_dir;
       break;
     case pref_file:
@@ -655,7 +691,7 @@ static int register_pref_sub(lua_State *L)
         dt_conf_set_string(pref_name, built_elt->type_data.string_data.default_value);
 
       built_elt->widget = gtk_entry_new();
-      built_elt->tooltip_reset= g_strdup_printf( _("double click to reset to `%s'"),
+      built_elt->tooltip_reset= g_strdup_printf( _("double-click to reset to `%s'"),
           built_elt->type_data.string_data.default_value);
       g_object_ref_sink(G_OBJECT(built_elt->widget));
       built_elt->update_widget = update_widget_string;
@@ -694,7 +730,7 @@ static int register_pref_sub(lua_State *L)
         built_elt->widget = gtk_spin_button_new_with_range(min, max, 1);
         gtk_spin_button_set_digits(GTK_SPIN_BUTTON(built_elt->widget), 0);
         g_object_ref_sink(G_OBJECT(built_elt->widget));
-        built_elt->tooltip_reset = g_strdup_printf( _("double click to reset to `%d'"),
+        built_elt->tooltip_reset = g_strdup_printf( _("double-click to reset to `%d'"),
             built_elt->type_data.int_data.default_value);
         built_elt->update_widget = update_widget_int;
         break;
@@ -735,20 +771,20 @@ static int register_pref_sub(lua_State *L)
         if(!dt_conf_key_exists(pref_name))
           dt_conf_set_string(pref_name, built_elt->type_data.lua_data.default_value);
 
-        built_elt->tooltip_reset= g_strdup_printf( _("double click to reset to `%s'"),
+        built_elt->tooltip_reset= g_strdup_printf( _("double-click to reset to `%s'"),
             built_elt->type_data.lua_data.default_value);
 
         lua_widget widget;
-        luaA_to(L,lua_widget,&widget,cur_param);
+        luaA_to(L, lua_widget, &widget, cur_param);
         cur_param++;
-        dt_lua_widget_bind(L,widget);
+        dt_lua_widget_bind(L, widget);
         built_elt->widget = widget->widget;
         built_elt->update_widget = update_widget_lua;
 
-        luaL_checktype(L,cur_param,LUA_TFUNCTION);
-        luaA_push(L,lua_widget,widget);
-        lua_pushvalue(L,cur_param);
-        dt_lua_widget_set_callback(L,-2,"set_pref");
+        luaL_checktype(L, cur_param, LUA_TFUNCTION);
+        luaA_push(L, lua_widget, widget);
+        lua_pushvalue(L, cur_param);
+        dt_lua_widget_set_callback(L, -2, "set_pref");
         lua_pop(L,1);
 
         break;
@@ -766,7 +802,7 @@ static int register_pref(lua_State *L)
   dt_lua_gtk_wrap(L);
   lua_insert(L, 1);
   lua_pushlightuserdata(L, &built_elt);
-  int result = dt_lua_treated_pcall(L,lua_gettop(L)-1,0);
+  int result = dt_lua_treated_pcall(L, lua_gettop(L) - 1, 0);
   if(result == LUA_OK)
   {
     built_elt->next = pref_list;
@@ -781,7 +817,7 @@ static int register_pref(lua_State *L)
 }
 
 
-GtkGrid* init_tab_lua(GtkWidget *dialog, GtkWidget *tab)
+GtkGrid* init_tab_lua(GtkWidget *dialog, GtkWidget *stack)
 {
   if(!pref_list) return NULL; // no option registered => don't create the tab
   GtkWidget *label, *labelev, *viewport;
@@ -797,11 +833,9 @@ GtkGrid* init_tab_lua(GtkWidget *dialog, GtkWidget *tab)
   gtk_viewport_set_shadow_type(GTK_VIEWPORT(viewport), GTK_SHADOW_NONE); // doesn't seem to work from gtkrc
   gtk_container_add(GTK_CONTAINER(scroll), viewport);
   gtk_container_add(GTK_CONTAINER(viewport), grid);
-  gtk_notebook_append_page(GTK_NOTEBOOK(tab), scroll, gtk_label_new(_("lua options")));
-  dtgtk_justify_notebook_tabs(GTK_NOTEBOOK(tab));
+  gtk_stack_add_titled(GTK_STACK(stack), scroll, _("lua options"), _("lua options"));
 
-  pref_element *cur_elt = pref_list;
-  while(cur_elt)
+  for(pref_element *cur_elt = pref_list; cur_elt; cur_elt = cur_elt->next)
   {
     char pref_name[1024];
     get_pref_name(pref_name, sizeof(pref_name), cur_elt->script, cur_elt->name);
@@ -816,7 +850,6 @@ GtkGrid* init_tab_lua(GtkWidget *dialog, GtkWidget *tab)
     gtk_widget_set_tooltip_text(cur_elt->widget, cur_elt->tooltip);
     gtk_grid_attach(GTK_GRID(grid), labelev, 0, line, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), cur_elt->widget, 1, line, 1, 1);
-    cur_elt = cur_elt->next;
     line++;
   }
   return GTK_GRID(grid);
@@ -826,7 +859,7 @@ GtkGrid* init_tab_lua(GtkWidget *dialog, GtkWidget *tab)
 void destroy_tab_lua(GtkGrid *grid)
 {
   if(!grid) return;
-  gtk_grid_remove_column(grid,1); // detach all special widgets to avoid having them destroyed
+  gtk_grid_remove_column(grid, 1); // detach all special widgets to avoid having them destroyed
 }
 
 
@@ -853,6 +886,12 @@ int dt_lua_init_preferences(lua_State *L)
 
   lua_pushcfunction(L, write_pref);
   lua_setfield(L, -2, "write");
+
+  lua_pushcfunction(L, destroy_pref);
+  lua_setfield(L, -2, "destroy");
+
+  lua_pushcfunction(L, get_keys);
+  lua_setfield(L, -2, "get_keys");
 
   lua_pop(L, 1);
   return 0;

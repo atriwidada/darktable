@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2018-2019 Aldric Renaudin.
+    Copyright (C) 2019-2021 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -269,7 +269,7 @@ static int _time_compare(dt_lib_timeline_time_t t1, dt_lib_timeline_time_t t2)
   return 0;
 }
 
-// add/substract value to a time at certain level
+// add/subtract value to a time at certain level
 static void _time_add(dt_lib_timeline_time_t *t, int val, dt_lib_timeline_zooms_t level)
 {
   if(level == DT_LIB_TIMELINE_ZOOM_YEAR)
@@ -370,7 +370,7 @@ static void _time_add(dt_lib_timeline_time_t *t, int val, dt_lib_timeline_zooms_
     }
     while(t->minute < 0)
     {
-      t->hour += 60;
+      t->minute += 60;
       _time_add(t, -1, DT_LIB_TIMELINE_ZOOM_HOUR);
     }
   }
@@ -385,8 +385,7 @@ static dt_lib_timeline_time_t _time_get_from_pos(int pos, dt_lib_timeline_t *str
   dt_lib_timeline_time_t tt = _time_init();
 
   int x = 0;
-  GList *bl = strip->blocks;
-  while(bl)
+  for(const GList *bl = strip->blocks; bl; bl = g_list_next(bl))
   {
     dt_lib_timeline_block_t *blo = bl->data;
     if(pos < x + blo->width)
@@ -431,14 +430,14 @@ static dt_lib_timeline_time_t _time_get_from_pos(int pos, dt_lib_timeline_t *str
       }
       else if(strip->zoom == DT_LIB_TIMELINE_ZOOM_HOUR)
       {
-        tt.minute = (pos - x) / _block_get_bar_width(strip->zoom) + 1;
+        int nb = (pos - x) / _block_get_bar_width(strip->zoom) + 1;
+        _time_add(&tt, nb, DT_LIB_TIMELINE_ZOOM_MINUTE);
         if(tt.minute < 0) tt.minute = 0;
       }
 
       return tt;
     }
     x += blo->width + 2;
-    bl = bl->next;
   }
 
   return tt;
@@ -454,13 +453,12 @@ static dt_lib_timeline_time_t _time_compute_offset_for_zoom(int pos, dt_lib_time
   // we search the number of the bloc under pos
   int bloc_nb = 0;
   int x = 0;
-  GList *bl = strip->blocks;
-  while(bl)
+  GList *bl;
+  for(bl = strip->blocks; bl; bl = g_list_next(bl))
   {
     dt_lib_timeline_block_t *blo = bl->data;
     if(pos < x + blo->width) break;
     x += blo->width + 2;
-    bl = bl->next;
     bloc_nb++;
   }
   if(!bl)
@@ -504,12 +502,12 @@ static gchar *_time_format_for_ui(dt_lib_timeline_time_t t, dt_lib_timeline_zoom
   }
   else if(zoom == DT_LIB_TIMELINE_ZOOM_6HOUR)
   {
-    return g_strdup_printf("%02d/%02d/%02d (%02dh-%02dh)", t.day, t.month, t.year % 100, t.hour / 6 * 6,
+    return g_strdup_printf("%02d/%02d/%02d (h%02d-%02d)", t.day, t.month, t.year % 100, t.hour / 6 * 6,
                            t.hour / 6 * 6 + 5);
   }
   else if(zoom == DT_LIB_TIMELINE_ZOOM_HOUR)
   {
-    return g_strdup_printf("%02d/%02d/%02d %02dh", t.day, t.month, t.year % 100, t.hour);
+    return g_strdup_printf("%02d/%02d/%02d h%02d", t.day, t.month, t.year % 100, t.hour);
   }
   else if(zoom == DT_LIB_TIMELINE_ZOOM_10MINUTE)
   {
@@ -518,7 +516,7 @@ static gchar *_time_format_for_ui(dt_lib_timeline_time_t t, dt_lib_timeline_zoom
   }
   else if(zoom == DT_LIB_TIMELINE_ZOOM_MINUTE)
   {
-    return g_strdup_printf("%02d/%02d/%02d %02dh%02d", t.day, t.month, t.year % 100, t.hour, t.minute);
+    return g_strdup_printf("%02d/%02d/%02d %02d:%02d", t.day, t.month, t.year % 100, t.hour, t.minute);
   }
 
   return NULL;
@@ -570,9 +568,10 @@ static gboolean _time_read_bounds_from_db(dt_lib_module_t *self)
   dt_lib_timeline_t *strip = (dt_lib_timeline_t *)self->data;
 
   sqlite3_stmt *stmt;
-  const char *query = "SELECT datetime_taken FROM main.images WHERE LENGTH(datetime_taken) = 19 AND "
-                      "datetime_taken > '0001:01:01 00:00:00' ORDER BY "
-                      "datetime_taken ASC LIMIT 1";
+  const char *query = "SELECT SUBSTR(datetime_taken, 1, 19) AS dt FROM main.images "
+                      "WHERE LENGTH(dt) = 19 AND"
+                      " dt > '0001:01:01 00:00:00' "
+                      "COLLATE NOCASE ORDER BY dt ASC LIMIT 1";
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
 
   if(sqlite3_step(stmt) == SQLITE_ROW)
@@ -590,9 +589,10 @@ static gboolean _time_read_bounds_from_db(dt_lib_module_t *self)
     strip->has_selection = FALSE;
   sqlite3_finalize(stmt);
 
-  const char *query2 = "SELECT datetime_taken FROM main.images WHERE LENGTH(datetime_taken) = 19 AND "
-                       "datetime_taken > '0001:01:01 00:00:00' ORDER BY "
-                       "datetime_taken DESC LIMIT 1";
+  const char *query2 = "SELECT SUBSTR(datetime_taken, 1, 19) AS dt FROM main.images "
+                       "WHERE LENGTH(dt) = 19 AND"
+                       " dt > '0001:01:01 00:00:00' COLLATE NOCASE "
+                       "ORDER BY dt DESC LIMIT 1";
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query2, -1, &stmt, NULL);
 
   if(sqlite3_step(stmt) == SQLITE_ROW)
@@ -616,10 +616,11 @@ static gboolean _time_read_bounds_from_collection(dt_lib_module_t *self)
   dt_lib_timeline_t *strip = (dt_lib_timeline_t *)self->data;
 
   sqlite3_stmt *stmt;
-  const char *query = "SELECT db.datetime_taken FROM main.images AS db, memory.collected_images AS col WHERE "
-                      "db.id=col.imgid AND LENGTH(db.datetime_taken) = 19 AND db.datetime_taken > '0001:01:01 "
-                      "00:00:00' ORDER BY "
-                      "db.datetime_taken ASC LIMIT 1";
+  const char *query = "SELECT SUBSTR(db.datetime_taken, 1, 19) AS dt "
+                      "FROM main.images AS db, memory.collected_images AS col "
+                      "WHERE db.id=col.imgid AND LENGTH(dt) = 19 AND"
+                      " dt > '0001:01:01 00:00:00' "
+                      "COLLATE NOCASE ORDER BY dt ASC LIMIT 1";
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
 
   if(sqlite3_step(stmt) == SQLITE_ROW)
@@ -637,10 +638,11 @@ static gboolean _time_read_bounds_from_collection(dt_lib_module_t *self)
     strip->has_selection = FALSE;
   sqlite3_finalize(stmt);
 
-  const char *query2 = "SELECT db.datetime_taken FROM main.images AS db, memory.collected_images AS col WHERE "
-                       "db.id=col.imgid AND LENGTH(db.datetime_taken) = 19 AND db.datetime_taken > '0001:01:01 "
-                       "00:00:00' ORDER BY "
-                       "db.datetime_taken DESC LIMIT 1";
+  const char *query2 = "SELECT SUBSTR(db.datetime_taken, 1, 19) AS dt "
+                       "FROM main.images AS db, memory.collected_images AS col "
+                       "WHERE db.id=col.imgid AND LENGTH(dt) = 19 AND"
+                       " dt > '0001:01:01 00:00:00' "
+                       "COLLATE NOCASE ORDER BY dt DESC LIMIT 1";
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query2, -1, &stmt, NULL);
 
   if(sqlite3_step(stmt) == SQLITE_ROW)
@@ -733,10 +735,11 @@ static int _block_get_at_zoom(dt_lib_module_t *self, int width)
   if(_time_compare_at_zoom(strip->stop_t, strip->time_pos, strip->zoom) < 0) strip->stop_x = -1;
 
   sqlite3_stmt *stmt;
-  gchar *query = g_strdup_printf("SELECT db.datetime_taken, col.imgid FROM main.images AS db LEFT JOIN "
-                                 "memory.collected_images AS col ON db.id=col.imgid WHERE "
-                                 "LENGTH(db.datetime_taken) = 19 AND "
-                                 "db.datetime_taken > '%s' ORDER BY db.datetime_taken ASC",
+  gchar *query = g_strdup_printf("SELECT SUBSTR(db.datetime_taken, 1, 19) AS dt,"
+                                 " col.imgid FROM main.images AS db "
+                                 "LEFT JOIN memory.collected_images AS col ON db.id=col.imgid "
+                                 "WHERE LENGTH(dt) = 19 AND dt > '%s' "
+                                 "COLLATE NOCASE ORDER BY dt ASC",
                                  _time_format_for_db(strip->time_pos, strip->zoom, TRUE));
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
 
@@ -869,7 +872,9 @@ static gboolean _time_is_visible(dt_lib_timeline_time_t t, dt_lib_timeline_t *st
   return TRUE;
 }
 
-static void _lib_timeline_collection_changed(gpointer instance, gpointer user_data)
+static void _lib_timeline_collection_changed(gpointer instance, dt_collection_change_t query_change,
+                                             dt_collection_properties_t changed_property, gpointer imgs, int next,
+                                             gpointer user_data)
 {
   dt_lib_module_t *self = (dt_lib_module_t *)user_data;
   dt_lib_timeline_t *strip = (dt_lib_timeline_t *)self->data;
@@ -890,6 +895,12 @@ static void _lib_timeline_collection_changed(gpointer instance, gpointer user_da
 }
 
 
+static gboolean _timespec_has_date_only(const char *const spec)
+{
+  // spec could be "YYYY:MM", "YYYY:MM:DD", "YYYY:MM:DD HH", etc.
+  return strlen(spec) <= 10; // is string YYYY:MM:DD or shorter?
+}
+
 // add the selected portions to the collect
 static void _selection_collect(dt_lib_timeline_t *strip, dt_lib_timeline_mode_t mode)
 {
@@ -908,8 +919,8 @@ static void _selection_collect(dt_lib_timeline_t *strip, dt_lib_timeline_mode_t 
     snprintf(confname, sizeof(confname), "plugins/lighttable/collect/string%1d", nb_rules - 1);
     gchar *string = dt_conf_get_string(confname);
     string = g_strstrip(string);
-    if((prop == DT_COLLECTION_PROP_TIME && rmode == 0) || !string || strlen(string) == 0
-       || g_strcmp0(string, "%") == 0)
+    if(((prop == DT_COLLECTION_PROP_TIME || prop == DT_COLLECTION_PROP_DAY) && rmode == 0)
+       || !string || strlen(string) == 0 || g_strcmp0(string, "%") == 0)
       new_rule = nb_rules - 1;
     else
       new_rule = nb_rules;
@@ -918,9 +929,11 @@ static void _selection_collect(dt_lib_timeline_t *strip, dt_lib_timeline_mode_t 
 
   // we construct the rule
   gchar *coll = NULL;
+  gboolean date_only = FALSE;
   if(strip->start_x == strip->stop_x)
   {
     coll = _time_format_for_db(strip->start_t, (strip->zoom + 1) / 2 * 2 + 2, FALSE);
+    date_only = _timespec_has_date_only(coll);
   }
   else
   {
@@ -934,7 +947,11 @@ static void _selection_collect(dt_lib_timeline_t *strip, dt_lib_timeline_mode_t 
     }
     gchar *d1 = _time_format_for_db(start, (strip->zoom + 1) / 2 * 2 + 2, FALSE);
     gchar *d2 = _time_format_for_db(stop, (strip->zoom + 1) / 2 * 2 + 2, FALSE);
-    if(d1 && d2) coll = g_strdup_printf("[%s;%s]", d1, d2);
+    if(d1 && d2)
+    {
+      coll = g_strdup_printf("[%s;%s]", d1, d2);
+      date_only = _timespec_has_date_only(d1) && _timespec_has_date_only(d2);
+    }
     g_free(d1);
     g_free(d2);
   }
@@ -944,15 +961,15 @@ static void _selection_collect(dt_lib_timeline_t *strip, dt_lib_timeline_mode_t 
     dt_conf_set_int("plugins/lighttable/collect/num_rules", new_rule + 1);
     char confname[200] = { 0 };
     snprintf(confname, sizeof(confname), "plugins/lighttable/collect/item%1d", new_rule);
-    dt_conf_set_int(confname, DT_COLLECTION_PROP_TIME);
+    dt_conf_set_int(confname, date_only ? DT_COLLECTION_PROP_DAY : DT_COLLECTION_PROP_TIME);
     snprintf(confname, sizeof(confname), "plugins/lighttable/collect/mode%1d", new_rule);
     dt_conf_set_int(confname, 0);
     snprintf(confname, sizeof(confname), "plugins/lighttable/collect/string%1d", new_rule);
     dt_conf_set_string(confname, coll);
     g_free(coll);
 
-    dt_collection_update_query(darktable.collection);
-    dt_control_signal_raise(darktable.signals, DT_SIGNAL_COLLECTION_QUERY_CHANGED);
+    dt_collection_update_query(darktable.collection, DT_COLLECTION_CHANGE_NEW_QUERY, DT_COLLECTION_PROP_UNDEF,
+                               NULL);
   }
 }
 
@@ -1004,9 +1021,8 @@ static gboolean _lib_timeline_draw_callback(GtkWidget *widget, cairo_t *wcr, gpo
     cairo_paint(cr);
 
     // draw content depending of zoom level
-    GList *bl = strip->blocks;
     int posx = 0;
-    while(bl)
+    for(const GList *bl = strip->blocks; bl; bl = g_list_next(bl))
     {
       dt_lib_timeline_block_t *blo = bl->data;
 
@@ -1014,30 +1030,29 @@ static gboolean _lib_timeline_draw_callback(GtkWidget *widget, cairo_t *wcr, gpo
       int wb = blo->values_count * wu;
 
       cairo_text_extents_t te;
-      dt_gui_gtk_set_source_rgb(cr, DT_GUI_COLOR_BRUSH_CURSOR);
-      cairo_set_font_size(cr, 10);
+      dt_gui_gtk_set_source_rgb(cr, DT_GUI_COLOR_TIMELINE_TEXT_FG);
+      cairo_set_font_size(cr, 10 * (1 + (darktable.gui->dpi_factor - 1) / 2));
       cairo_text_extents(cr, blo->name, &te);
       int bh = allocation.height - te.height - 4;
       cairo_move_to(cr, posx + (wb - te.width) / 2 - te.x_bearing, allocation.height - 2);
       cairo_show_text(cr, blo->name);
 
-      dt_gui_gtk_set_source_rgb(cr, DT_GUI_COLOR_THUMBNAIL_BG);
+      dt_gui_gtk_set_source_rgb(cr, DT_GUI_COLOR_TIMELINE_BG);
       cairo_rectangle(cr, posx, 0, wb, bh);
       cairo_fill(cr);
 
       for(int i = 0; i < blo->values_count; i++)
       {
-        dt_gui_gtk_set_source_rgba(cr, DT_GUI_COLOR_THUMBNAIL_HOVER_BG, 0.5);
+        dt_gui_gtk_set_source_rgba(cr, DT_GUI_COLOR_TIMELINE_FG, 0.5);
         int h = _block_get_bar_height(blo->values[i], bh);
         cairo_rectangle(cr, posx + (i * wu), bh - h, wu, h);
         cairo_fill(cr);
-        dt_gui_gtk_set_source_rgba(cr, DT_GUI_COLOR_THUMBNAIL_HOVER_BG, 1.0);
+        dt_gui_gtk_set_source_rgba(cr, DT_GUI_COLOR_TIMELINE_FG, 1.0);
         h = _block_get_bar_height(blo->collect_values[i], bh);
         cairo_rectangle(cr, posx + (i * wu), bh - h, wu, h);
         cairo_fill(cr);
       }
 
-      bl = bl->next;
       posx += wb + 2;
       if(posx >= allocation.width) break;
     }
@@ -1071,7 +1086,7 @@ static gboolean _lib_timeline_draw_callback(GtkWidget *widget, cairo_t *wcr, gpo
       if(start >= 0)
       {
         // dt_gui_gtk_set_source_rgb(wcr, DT_GUI_COLOR_THUMBNAIL_HOVER_BG);
-        dt_gui_gtk_set_source_rgba(wcr, DT_GUI_COLOR_THUMBNAIL_HOVER_BG, 0.8);
+        dt_gui_gtk_set_source_rgba(wcr, DT_GUI_COLOR_TIMELINE_FG, 0.8);
         cairo_move_to(wcr, start, 0);
         cairo_line_to(wcr, start, allocation.height);
         cairo_stroke(wcr);
@@ -1080,12 +1095,12 @@ static gboolean _lib_timeline_draw_callback(GtkWidget *widget, cairo_t *wcr, gpo
         cairo_line_to(wcr, start, allocation.height);
         cairo_stroke(wcr);
       }
-      dt_gui_gtk_set_source_rgba(wcr, DT_GUI_COLOR_THUMBNAIL_HOVER_BG, 0.5);
+      dt_gui_gtk_set_source_rgba(wcr, DT_GUI_COLOR_TIMELINE_FG, 0.5);
       cairo_rectangle(wcr, start, 0, stop - start, allocation.height);
       cairo_fill(wcr);
       if(stop <= strip->panel_width)
       {
-        dt_gui_gtk_set_source_rgba(wcr, DT_GUI_COLOR_THUMBNAIL_HOVER_BG, 0.8);
+        dt_gui_gtk_set_source_rgba(wcr, DT_GUI_COLOR_TIMELINE_FG, 0.8);
         cairo_move_to(wcr, stop, 0);
         cairo_line_to(wcr, stop, allocation.height);
         cairo_stroke(wcr);
@@ -1109,19 +1124,19 @@ static gboolean _lib_timeline_draw_callback(GtkWidget *widget, cairo_t *wcr, gpo
     // we don't display NULL date (if it's outside bounds)
     if(_time_compare(tt, _time_init()) != 0)
     {
-      dt_gui_gtk_set_source_rgb(wcr, DT_GUI_COLOR_BRUSH_TRACE);
+      dt_gui_gtk_set_source_rgb(wcr, DT_GUI_COLOR_TIMELINE_TEXT_BG);
       cairo_move_to(wcr, strip->current_x, 0);
       cairo_line_to(wcr, strip->current_x, allocation.height);
       cairo_stroke(wcr);
       gchar *dte = _time_format_for_ui(tt, strip->precision);
       cairo_text_extents_t te2;
-      cairo_set_font_size(wcr, 10);
+      cairo_set_font_size(wcr, 10 * darktable.gui->dpi_factor);
       cairo_text_extents(wcr, dte, &te2);
       cairo_rectangle(wcr, strip->current_x, 8, te2.width + 4, te2.height + 4);
-      dt_gui_gtk_set_source_rgb(wcr, DT_GUI_COLOR_BRUSH_TRACE);
+      dt_gui_gtk_set_source_rgb(wcr, DT_GUI_COLOR_TIMELINE_TEXT_BG);
       cairo_fill(wcr);
       cairo_move_to(wcr, strip->current_x + 2, 10 + te2.height);
-      dt_gui_gtk_set_source_rgb(wcr, DT_GUI_COLOR_BRUSH_CURSOR);
+      dt_gui_gtk_set_source_rgb(wcr, DT_GUI_COLOR_TIMELINE_TEXT_FG);
       cairo_show_text(wcr, dte);
       g_free(dte);
     }
@@ -1156,7 +1171,11 @@ static gboolean _lib_timeline_button_press_callback(GtkWidget *w, GdkEventButton
       else
       {
         strip->start_x = strip->stop_x = e->x;
-        strip->start_t = strip->stop_t = _time_get_from_pos(e->x, strip);
+        dt_lib_timeline_time_t tt = _time_get_from_pos(e->x, strip);
+        if(_time_compare(tt, _time_init()) == 0)
+          strip->start_t = strip->stop_t = strip->time_maxi; //we are past the end so selection extends until the end
+        else
+          strip->start_t = strip->stop_t = tt;
         strip->move_edge = FALSE;
       }
       strip->selecting = TRUE;
@@ -1175,7 +1194,8 @@ static gboolean _lib_timeline_button_press_callback(GtkWidget *w, GdkEventButton
       if(dt_conf_get_int(confname) == DT_COLLECTION_PROP_TIME)
       {
         dt_conf_set_int("plugins/lighttable/collect/num_rules", nb_rules - 1);
-        dt_collection_update_query(darktable.collection);
+        dt_collection_update_query(darktable.collection, DT_COLLECTION_CHANGE_RELOAD, DT_COLLECTION_PROP_UNDEF,
+                                   NULL);
 
         strip->selecting = FALSE;
       }
@@ -1193,23 +1213,29 @@ static gboolean _lib_timeline_button_release_callback(GtkWidget *w, GdkEventButt
   if(strip->selecting)
   {
     strip->stop_x = e->x;
-    strip->stop_t = _time_get_from_pos(e->x, strip);
-    // we want to be at the "end" of this date
-    if(strip->zoom <= DT_LIB_TIMELINE_ZOOM_DAY)
+    dt_lib_timeline_time_t tt = _time_get_from_pos(e->x, strip);
+    if(_time_compare(tt, _time_init()) == 0)
+      strip->stop_t = strip->time_maxi; //we are past the end so selection extends until the end
+    else
     {
-      strip->stop_t.minute = 59;
-      if(strip->zoom <= DT_LIB_TIMELINE_ZOOM_MONTH)
+      strip->stop_t = tt;
+      // we want to be at the "end" of this date
+      if(strip->zoom <= DT_LIB_TIMELINE_ZOOM_DAY)
       {
-        strip->stop_t.hour = 23;
-        if(strip->zoom <= DT_LIB_TIMELINE_ZOOM_YEAR)
-        {
-          strip->stop_t.day = _time_days_in_month(strip->stop_t.year, strip->stop_t.month);
-        }
+	strip->stop_t.minute = 59;
+	if(strip->zoom <= DT_LIB_TIMELINE_ZOOM_MONTH)
+	{
+	  strip->stop_t.hour = 23;
+	  if(strip->zoom <= DT_LIB_TIMELINE_ZOOM_YEAR)
+	  {
+	    strip->stop_t.day = _time_days_in_month(strip->stop_t.year, strip->stop_t.month);
+	  }
+	}
       }
     }
     strip->selecting = FALSE;
 
-    if(!strip->move_edge && (e->state & GDK_SHIFT_MASK))
+    if(!strip->move_edge && dt_modifier_is(e->state, GDK_SHIFT_MASK))
       _selection_collect(strip, DT_LIB_TIMELINE_MODE_RESET);
     else
       _selection_collect(strip, DT_LIB_TIMELINE_MODE_AND);
@@ -1225,11 +1251,15 @@ static gboolean _selection_start(GtkAccelGroup *accel_group, GObject *aceelerata
   dt_lib_timeline_t *strip = (dt_lib_timeline_t *)data;
 
   strip->start_x = strip->current_x;
-  strip->start_t = _time_get_from_pos(strip->current_x, strip);
-
+  dt_lib_timeline_time_t tt = _time_get_from_pos(strip->current_x, strip);
+  if(_time_compare(tt, _time_init()) == 0)
+    strip->start_t = strip->time_maxi; //we are past the end so selection extends until the end
+  else
+    strip->start_t = _time_get_from_pos(strip->current_x, strip);
   strip->stop_x = strip->start_x;
   strip->stop_t = strip->start_t;
   strip->selecting = TRUE;
+  strip->has_selection = TRUE;
 
   gtk_widget_queue_draw(strip->timeline);
   return TRUE;
@@ -1238,19 +1268,25 @@ static gboolean _selection_stop(GtkAccelGroup *accel_group, GObject *aceeleratab
                                 GdkModifierType modifier, gpointer data)
 {
   dt_lib_timeline_t *strip = (dt_lib_timeline_t *)data;
+  dt_lib_timeline_time_t tt = _time_get_from_pos(strip->current_x, strip);
 
   strip->stop_x = strip->current_x;
-  strip->stop_t = _time_get_from_pos(strip->current_x, strip);
-  // we want to be at the "end" of this date
-  if(strip->zoom < DT_LIB_TIMELINE_ZOOM_HOUR)
+  if(_time_compare(tt, _time_init()) == 0)
+    strip->stop_t = strip->time_maxi; //we are past the end so selection extends until the end
+  else
   {
-    strip->stop_t.minute = 59;
-    if(strip->zoom < DT_LIB_TIMELINE_ZOOM_DAY)
+    strip->stop_t = tt;
+    // we want to be at the "end" of this date
+    if(strip->zoom < DT_LIB_TIMELINE_ZOOM_HOUR)
     {
-      strip->stop_t.hour = 23;
-      if(strip->zoom < DT_LIB_TIMELINE_ZOOM_MONTH)
+      strip->stop_t.minute = 59;
+      if(strip->zoom < DT_LIB_TIMELINE_ZOOM_DAY)
       {
-        strip->stop_t.day = _time_days_in_month(strip->stop_t.year, strip->stop_t.month);
+	strip->stop_t.hour = 23;
+	if(strip->zoom < DT_LIB_TIMELINE_ZOOM_MONTH)
+	{
+	  strip->stop_t.day = _time_days_in_month(strip->stop_t.year, strip->stop_t.month);
+	}
       }
     }
   }
@@ -1260,6 +1296,7 @@ static gboolean _selection_stop(GtkAccelGroup *accel_group, GObject *aceeleratab
   gtk_widget_queue_draw(strip->timeline);
   return TRUE;
 }
+
 static gboolean _block_autoscroll(gpointer user_data)
 {
   // this function is called repetidly until the pointer is not more in the autoscoll zone
@@ -1284,11 +1321,13 @@ static gboolean _block_autoscroll(gpointer user_data)
     return FALSE;
   }
 
+  dt_lib_timeline_time_t old_pos = strip->time_pos;
   _time_add(&(strip->time_pos), move, strip->zoom);
   // we ensure that the fimlstrip stay in the bounds
   dt_lib_timeline_time_t tt = _selection_scroll_to(strip->time_pos, strip);
   if(_time_compare(tt, strip->time_pos) != 0)
   {
+    strip->time_pos = old_pos; //no scroll, so we restore the previous position
     strip->autoscroll = FALSE;
     return FALSE;
   }
@@ -1351,16 +1390,20 @@ static gboolean _lib_timeline_scroll_callback(GtkWidget *w, GdkEventScroll *e, g
   dt_lib_timeline_t *strip = (dt_lib_timeline_t *)self->data;
 
   // zoom change (with Ctrl key)
-  if(e->state & GDK_CONTROL_MASK)
+  if(dt_modifier_is(e->state, GDK_CONTROL_MASK))
   {
     int z = strip->zoom;
-    if(e->direction == GDK_SCROLL_UP)
+    int delta_y = 0;
+    if(dt_gui_get_scroll_unit_deltas(e, NULL, &delta_y))
     {
-      if(z != DT_LIB_TIMELINE_ZOOM_HOUR) z++;
-    }
-    else if(e->direction == GDK_SCROLL_DOWN)
-    {
-      if(z != DT_LIB_TIMELINE_ZOOM_YEAR) z--;
+      if(delta_y < 0)
+      {
+        if(z != DT_LIB_TIMELINE_ZOOM_HOUR) z++;
+      }
+      else if(delta_y > 0)
+      {
+        if(z != DT_LIB_TIMELINE_ZOOM_YEAR) z--;
+      }
     }
 
     // if the zoom as changed, we need to recompute blocks and redraw
@@ -1384,8 +1427,8 @@ static gboolean _lib_timeline_scroll_callback(GtkWidget *w, GdkEventScroll *e, g
     int delta;
     if(dt_gui_get_scroll_unit_delta(e, &delta))
     {
-      int move = -delta;
-      if(e->state & GDK_SHIFT_MASK) move *= 2;
+      int move = delta;
+      if(dt_modifier_is(e->state, GDK_SHIFT_MASK)) move *= 2;
 
       _time_add(&(strip->time_pos), move, strip->zoom);
       // we ensure that the fimlstrip stay in the bounds
@@ -1445,11 +1488,12 @@ void gui_init(dt_lib_module_t *self)
   d->time_pos = d->time_mini;
   /* creating drawing area */
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->plugin_name));
 
   /* creating timeline box*/
   d->timeline = gtk_event_box_new();
 
-  gtk_widget_add_events(d->timeline, GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK | GDK_BUTTON_PRESS_MASK
+  gtk_widget_add_events(d->timeline, GDK_POINTER_MOTION_MASK | GDK_BUTTON_PRESS_MASK
                                          | GDK_BUTTON_RELEASE_MASK | darktable.gui->scroll_mask
                                          | GDK_LEAVE_NOTIFY_MASK);
 
@@ -1467,12 +1511,12 @@ void gui_init(dt_lib_module_t *self)
   gtk_box_pack_start(GTK_BOX(self->widget), d->timeline, TRUE, TRUE, 0);
 
   // we update the selection with actual collect rules
-  _lib_timeline_collection_changed(NULL, self);
+  _lib_timeline_collection_changed(NULL, DT_COLLECTION_CHANGE_NEW_QUERY, DT_COLLECTION_PROP_UNDEF, NULL, -1, self);
 
   /* initialize view manager proxy */
   darktable.view_manager->proxy.timeline.module = self;
 
-  dt_control_signal_connect(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED,
                             G_CALLBACK(_lib_timeline_collection_changed), (gpointer)self);
 }
 
@@ -1481,7 +1525,7 @@ void gui_cleanup(dt_lib_module_t *self)
   /* cleanup */
   dt_lib_timeline_t *strip = (dt_lib_timeline_t *)self->data;
   if(strip->blocks) g_list_free_full(strip->blocks, _block_free);
-  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_lib_timeline_collection_changed), self);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_lib_timeline_collection_changed), self);
   /* unset viewmanager proxy */
   darktable.view_manager->proxy.timeline.module = NULL;
   free(self->data);

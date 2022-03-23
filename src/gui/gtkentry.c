@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2012 christian tellefsen
+    Copyright (C) 2012-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -37,8 +37,6 @@ static gboolean on_match_select(GtkEntryCompletion *widget, GtkTreeModel *model,
   gchar *s = gtk_editable_get_chars(e, 0, -1);
   gint cur_pos = gtk_editable_get_position(e);
   gint p = cur_pos;
-  gchar *end;
-  gint del_end_pos = -1;
 
   GValue value = {
     0,
@@ -54,26 +52,16 @@ static gboolean on_match_select(GtkEntryCompletion *widget, GtkTreeModel *model,
     }
   }
 
-  end = s + cur_pos;
-
-  if(end)
-  {
-    del_end_pos = end - s + 1;
-  }
-  else
-  {
-    del_end_pos = cur_pos;
-  }
-
   size_t text_len = strlen(varname) + 2;
   gchar *addtext = (gchar *)g_malloc(text_len);
   snprintf(addtext, text_len, "%s)", varname);
 
-  gtk_editable_delete_text(e, p, del_end_pos);
+  gtk_editable_delete_text(e, p, cur_pos);
   gtk_editable_insert_text(e, addtext, -1, &p);
   gtk_editable_set_position(e, p);
   g_value_unset(&value);
   g_free(addtext);
+  g_free(s);
   return TRUE;
 }
 
@@ -93,15 +81,11 @@ static gboolean on_match_select(GtkEntryCompletion *widget, GtkTreeModel *model,
 static gboolean on_match_func(GtkEntryCompletion *completion, const gchar *key, GtkTreeIter *iter,
                               gpointer user_data)
 {
-  gchar *item = NULL;
-  gchar *normalized_string;
-  gchar *case_normalized_string;
   gboolean ret = FALSE;
-  GtkTreeModel *model = gtk_entry_completion_get_model(completion);
 
   GtkEditable *e = (GtkEditable *)gtk_entry_completion_get_entry(completion);
   gint cur_pos = gtk_editable_get_position(e); /* returns 1..* */
-  gint var_start;
+  gint var_start = 0;
   gboolean var_present = FALSE;
 
   for(gint p = cur_pos; p >= 0; p--)
@@ -121,17 +105,19 @@ static gboolean on_match_func(GtkEntryCompletion *completion, const gchar *key, 
   {
     gchar *varname = gtk_editable_get_chars(e, var_start, cur_pos);
 
+    GtkTreeModel *model = gtk_entry_completion_get_model(completion);
+    gchar *item = NULL;
     gtk_tree_model_get(model, iter, COMPL_VARNAME, &item, -1);
 
     if(item != NULL)
     {
       // Do utf8-safe case insensitive string compare.
       // Shamelessly stolen from GtkEntryCompletion.
-      normalized_string = g_utf8_normalize(item, -1, G_NORMALIZE_ALL);
+      gchar *normalized_string = g_utf8_normalize(item, -1, G_NORMALIZE_ALL);
 
       if(normalized_string != NULL)
       {
-        case_normalized_string = g_utf8_casefold(normalized_string, -1);
+        gchar *case_normalized_string = g_utf8_casefold(normalized_string, -1);
 
         if(!g_ascii_strncasecmp(varname, case_normalized_string, strlen(varname))) ret = TRUE;
 
@@ -140,8 +126,8 @@ static gboolean on_match_func(GtkEntryCompletion *completion, const gchar *key, 
       g_free(normalized_string);
     }
     g_free(varname);
+    g_free(item);
   }
-  g_free(item);
 
   return ret;
 }
@@ -183,42 +169,78 @@ void dt_gtkentry_setup_completion(GtkEntry *entry, const dt_gtkentry_completion_
 const dt_gtkentry_completion_spec *dt_gtkentry_get_default_path_compl_list()
 {
   static dt_gtkentry_completion_spec default_path_compl_list[]
-      = { { "ROLL_NAME", N_("$(ROLL_NAME) - roll of the input image") },
-          { "FILE_FOLDER", N_("$(FILE_FOLDER) - folder containing the input image") },
-          { "FILE_NAME", N_("$(FILE_NAME) - basename of the input image") },
-          { "FILE_EXTENSION", N_("$(FILE_EXTENSION) - extension of the input image") },
+      = { { "ROLL.NAME", N_("$(ROLL.NAME) - roll of the input image") },
+          { "FILE.FOLDER", N_("$(FILE.FOLDER) - folder containing the input image") },
+          { "FILE.NAME", N_("$(FILE.NAME) - basename of the input image") },
+          { "FILE.EXTENSION", N_("$(FILE.EXTENSION) - extension of the input image") },
           { "VERSION", N_("$(VERSION) - duplicate version") },
+          { "VERSION.IF_MULTI", N_("$(VERSION.IF_MULTI) - same as $(VERSION) but null string if only one version exists") },
+          { "VERSION.NAME", N_("$(VERSION.NAME) - version name from metadata") },
+          { "JOBCODE", N_("$(JOBCODE) - job code for import") },
           { "SEQUENCE", N_("$(SEQUENCE) - sequence number") },
-          { "MAX_WIDTH", N_("$(MAX_WIDTH) - maximum image export width") },
-          { "MAX_HEIGHT", N_("$(MAX_HEIGHT) - maximum image export height") },
+          { "WIDTH.MAX", N_("$(WIDTH.MAX) - maximum image export width") },
+          { "WIDTH.SENSOR", N_("$(WIDTH.SENSOR) - image sensor width") },
+          { "WIDTH.RAW", N_("$(WIDTH.RAW) - RAW image width") },
+          { "WIDTH.CROP", N_("$(WIDTH.CROP) - image width after crop") },
+          { "WIDTH.EXPORT", N_("$(WIDTH.EXPORT) - exported image width") },
+          { "HEIGHT.MAX", N_("$(HEIGHT.MAX) - maximum image export height") },
+          { "HEIGHT.SENSOR", N_("$(HEIGHT.SENSOR) - image sensor height") },
+          { "HEIGHT.RAW", N_("$(HEIGHT.RAW) - RAW image height") },
+          { "HEIGHT.CROP", N_("$(HEIGHT.CROP) - image height after crop") },
+          { "HEIGHT.EXPORT", N_("$(HEIGHT.EXPORT) - exported image height") },
           { "YEAR", N_("$(YEAR) - year") },
+          { "YEAR.SHORT", N_("$(YEAR.SHORT) - year without century") },
           { "MONTH", N_("$(MONTH) - month") },
+          { "MONTH.SHORT", N_("$(MONTH.SHORT) - abbreviated month name according to the current locale") },
+          { "MONTH.LONG", N_("$(MONTH.LONG) - full month name according to the current locale") },
           { "DAY", N_("$(DAY) - day") },
           { "HOUR", N_("$(HOUR) - hour") },
+          { "HOUR.AMPM", N_("$(HOUR.AMPM) - hour, 12-hour clock") },
           { "MINUTE", N_("$(MINUTE) - minute") },
           { "SECOND", N_("$(SECOND) - second") },
-          { "EXIF_YEAR", N_("$(EXIF_YEAR) - EXIF year") },
-          { "EXIF_MONTH", N_("$(EXIF_MONTH) - EXIF month") },
-          { "EXIF_DAY", N_("$(EXIF_DAY) - EXIF day") },
-          { "EXIF_HOUR", N_("$(EXIF_HOUR) - EXIF hour") },
-          { "EXIF_MINUTE", N_("$(EXIF_MINUTE) - EXIF minute") },
-          { "EXIF_SECOND", N_("$(EXIF_SECOND) - EXIF second") },
-          { "EXIF_ISO", N_("$(EXIF_ISO) - ISO value") },
-          { "MAKER", N_("$(MAKER) - camera maker") },
-          { "MODEL", N_("$(MODEL) - camera model") },
-          { "STARS", N_("$(STARS) - star rating") },
-          { "LABELS", N_("$(LABELS) - colorlabels") },
-          { "PICTURES_FOLDER", N_("$(PICTURES_FOLDER) - pictures folder") },
-          { "HOME", N_("$(HOME) - home folder") },
-          { "DESKTOP", N_("$(DESKTOP) - desktop folder") },
+          { "MSEC", N_("$(MSEC) - millisecond") },
+          { "EXIF.YEAR", N_("$(EXIF.YEAR) - EXIF year") },
+          { "EXIF.YEAR.SHORT", N_("$(EXIF.YEAR.SHORT) - EXIF year without century") },
+          { "EXIF.MONTH", N_("$(EXIF.MONTH) - EXIF month") },
+          { "EXIF.MONTH.SHORT", N_("$(EXIF.MONTH.SHORT) - abbreviated exif month name according to the current locale") },
+          { "EXIF.MONTH.LONG", N_("$(EXIF.MONTH.LONG) - full exif month name according to the current locale") },
+          { "EXIF.DAY", N_("$(EXIF.DAY) - EXIF day") },
+          { "EXIF.HOUR", N_("$(EXIF.HOUR) - EXIF hour") },
+          { "EXIF.HOUR.AMPM", N_("$(EXIF.HOUR.AMPM) - EXIF hour, 12-hour clock") },
+          { "EXIF.MINUTE", N_("$(EXIF.MINUTE) - EXIF minute") },
+          { "EXIF.SECOND", N_("$(EXIF.SECOND) - EXIF second") },
+          { "EXIF.MSEC", N_("$(EXIF.MSEC) - EXIF millisecond") },
+          { "EXIF.ISO", N_("$(EXIF.ISO) - ISO value") },
+          { "EXIF.EXPOSURE", N_("$(EXIF.EXPOSURE) - EXIF exposure") },
+          { "EXIF.EXPOSURE.BIAS", N_("$(EXIF.EXPOSURE.BIAS) - EXIF exposure bias") },
+          { "EXIF.APERTURE", N_("$(EXIF.APERTURE) - EXIF aperture") },
+          { "EXIF.FOCAL.LENGTH", N_("$(EXIF.FOCAL.LENGTH) - EXIF focal length") },
+          { "EXIF.FOCUS.DISTANCE", N_("$(EXIF.FOCUS.DISTANCE) - EXIF focal distance") },
+          { "EXIF.MAKER", N_("$(EXIF.MAKER) - camera maker") },
+          { "EXIF.MODEL", N_("$(EXIF.MODEL) - camera model") },
+          { "EXIF.LENS", N_("$(EXIF.LENS) - lens") },
+          { "LONGITUDE", N_("$(LONGITUDE) - longitude") },
+          { "LATITUDE", N_("$(LATITUDE) - latitude") },
+          { "ELEVATION", N_("$(ELEVATION) - elevation") },
+          { "STARS", N_("$(STARS) - star rating as number (-1 for rejected)") },
+          { "RATING.ICONS", N_("$(RATING.ICONS) - star/reject rating in icon form") },
+          { "LABELS", N_("$(LABELS) - color labels as text") },
+          { "LABELS.ICONS", N_("$(LABELS.ICONS) - color labels as icons") },
+          { "ID", N_("$(ID) - image ID") },
           { "TITLE", N_("$(TITLE) - title from metadata") },
           { "DESCRIPTION", N_("$(DESCRIPTION) - description from metadata") },
           { "CREATOR", N_("$(CREATOR) - creator from metadata") },
           { "PUBLISHER", N_("$(PUBLISHER) - publisher from metadata") },
           { "RIGHTS", N_("$(RIGHTS) - rights from metadata") },
-          { "OPENCL", N_("$(OPENCL_ACTIVATED) - whether OpenCL is activated") },
+          { "USERNAME", N_("$(USERNAME) - login name") },
+          { "FOLDER.PICTURE", N_("$(FOLDER.PICTURES) - pictures folder") },
+          { "FOLDER.HOME", N_("$(FOLDER.HOME) - home folder") },
+          { "FOLDER.DESKTOP", N_("$(FOLDER.DESKTOP) - desktop folder") },
+          { "OPENCL.ACTIVATED", N_("$(OPENCL.ACTIVATED) - whether OpenCL is activated") },
           { "CATEGORY", N_("$(CATEGORY0(category)) - subtag of level 0 in hierarchical tags") },
           { "TAGS", N_("$(TAGS) - tags as set in metadata settings") },
+          { "DARKTABLE.NAME", N_("$(DARKTABLE.NAME) - darktable name") },
+          { "DARKTABLE.VERSION", N_("$(DARKTABLE.VERSION) - current darktable version") },
           { NULL, NULL } };
 
   return default_path_compl_list;
@@ -235,7 +257,7 @@ gchar *dt_gtkentry_build_completion_tooltip_text(const gchar *header,
 {
   size_t array_len = 0;
   for(dt_gtkentry_completion_spec const *p = compl_list; p->description != NULL; p++) array_len++;
-  const gchar **lines = malloc((array_len + 2) * sizeof(gchar *));
+  const gchar **lines = malloc(sizeof(gchar *) * (array_len + 2));
   const gchar **l = lines;
   *l++ = header;
 

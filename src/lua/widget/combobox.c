@@ -1,6 +1,6 @@
 /*
    This file is part of darktable,
-   copyright (c) 2015 Jeremy Rosen
+   Copyright (C) 2015-2020 darktable developers.
 
    darktable is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -72,9 +72,7 @@ static int combobox_numindex(lua_State*L)
     lua_pushnil(L);
     return 1;
   }
-  const GList *entries = dt_bauhaus_combobox_get_entries(combobox->widget);
-  dt_bauhaus_combobox_entry_t *entry = (dt_bauhaus_combobox_entry_t *)g_list_nth_data((GList *)entries, key - 1);
-  lua_pushstring(L, entry->label);
+  lua_pushstring(L, dt_bauhaus_combobox_get_entry(combobox->widget, key - 1));
   return 1;
 }
 

@@ -2,24 +2,25 @@ cmake_minimum_required(VERSION 3.10.0)
 
 cmake_policy(SET CMP0011 NEW)
 cmake_policy(SET CMP0025 NEW)
-cmake_policy(SET CMP0048 OLD) # don't touch PROJECT_VERSION/VERSION
+cmake_policy(SET CMP0048 NEW)
 
-#
-# Avoid source tree pollution
-#
-set(CMAKE_DISABLE_SOURCE_CHANGES ON)
-set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules/")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
+
+### Add defaults for cmake
+# These defaults need to be included before the project() call.
+include(DefineCMakeDefaults)
 
 If(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
   message(FATAL_ERROR "In-source builds are not permitted. Make a separate folder for building:\nmkdir build; cd build; cmake ..\nBefore that, remove the files already created:\nrm -rf CMakeCache.txt CMakeFiles")
 endif(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules/")
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
-
-project(darktable CXX C)
-
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(DEFINED PROJECT_VERSION)
+  project(darktable VERSION ${PROJECT_VERSION} LANGUAGES CXX C)
+else()
+  # Actual version string will be generated from git later
+  project(darktable VERSION 0 LANGUAGES CXX C)
+endif()
 
 # Allow forcing the C/CPP compiler that is actually used during the compilation
 # to something other than what is used by the cmake run. This is useful when
@@ -41,6 +42,37 @@ include(DefineOptions.cmake)
 # Some defaults are set for OpenBSD as well (info and man pages).
 
 include(GNUInstallDirs)
+include(FeatureSummary)
+
+# resolve symbolic links into real path?
+get_filename_component(CMAKE_INSTALL_BINDIR_ABS "${CMAKE_INSTALL_FULL_BINDIR}" REALPATH "${CMAKE_INSTALL_PREFIX}")
+# get relative paths specific to the system
+file(RELATIVE_PATH REL_BIN_TO_LIBDIR    ${CMAKE_INSTALL_FULL_BINDIR} "${CMAKE_INSTALL_FULL_LIBDIR}/darktable")
+file(RELATIVE_PATH REL_BIN_TO_SHAREDIR  ${CMAKE_INSTALL_FULL_BINDIR} "${CMAKE_INSTALL_FULL_DATADIR}")
+file(RELATIVE_PATH REL_BIN_TO_LOCALEDIR ${CMAKE_INSTALL_FULL_BINDIR} "${CMAKE_INSTALL_FULL_LOCALEDIR}")
+set(REL_BIN_TO_DATADIR  "${REL_BIN_TO_SHAREDIR}/darktable")
+set(DARKTABLE_BINDIR    "${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}")
+set(DARKTABLE_LIBDIR    "${DARKTABLE_BINDIR}/${REL_BIN_TO_LIBDIR}")
+set(DARKTABLE_SHAREDIR  "${DARKTABLE_BINDIR}/${REL_BIN_TO_SHAREDIR}")
+set(DARKTABLE_DATADIR   "${DARKTABLE_BINDIR}/${REL_BIN_TO_DATADIR}") # DATAROOTDIR == DATADIR # darktablerc, themes, icons, ... Cannot use ${CMAKE_BINDIR}/data because not everything resides there. Like icons (pixmaps)
+set(DARKTABLE_LOCALEDIR "${DARKTABLE_BINDIR}/${REL_BIN_TO_LOCALEDIR}")
+
+# https://medium.com/@alasher/colored-c-compiler-output-with-ninja-clang-gcc-10bfe7f2b949
+if(${FORCE_COLORED_OUTPUT})
+  if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+    add_compile_options(-fdiagnostics-color=always)
+  elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+    add_compile_options(-fcolor-diagnostics)
+  endif()
+endif()
+
+# Whether to use relative paths for the build RPATH
+if (APPLE)
+    set(CMAKE_MACOSX_RPATH ON)
+    set(CMAKE_INSTALL_LIBDIR_RPATH @loader_path/../${CMAKE_INSTALL_LIBDIR}/darktable)
+else()
+    set(CMAKE_INSTALL_LIBDIR_RPATH $ORIGIN/../${CMAKE_INSTALL_LIBDIR}/darktable)
+endif()
 
 if (USE_OPENMP)
     if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
@@ -48,13 +80,13 @@ if (USE_OPENMP)
 
         # Clang has an option to specify the OpenMP standard to use. Specify it.
         # FIXME: Implement this in FindOpenMP.cmake
-        set(OPENMP_VERSION_SPECIFIER "-fopenmp-version=40")
+        set(OPENMP_VERSION_SPECIFIER "-fopenmp-version=45")
 
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OPENMP_VERSION_SPECIFIER}")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OPENMP_VERSION_SPECIFIER}")
     endif()
 
-    find_package(OpenMP 4.0 REQUIRED)
+    find_package(OpenMP 4.5 REQUIRED)
 endif()
 
 # Check for base threading library
@@ -71,7 +103,7 @@ include(ConfigureChecks.cmake)
 include(CheckCCompilerFlag)
 
 # Check if this is source package build
-if(NOT IS_DIRECTORY ${CMAKE_SOURCE_DIR}/.git)
+if(NOT EXISTS ${CMAKE_SOURCE_DIR}/.git)
   set(SOURCE_PACKAGE 1)
 else()
   set(SOURCE_PACKAGE 0)
@@ -92,15 +124,25 @@ MESSAGE(STATUS "Building SSE2-optimized codepaths: ${BUILD_SSE2_CODEPATHS}")
 #
 if(APPLE)
 	message("-- Mac OS X build detected, setting default features")
-
-	# prefer macports and/or user-installed libraries over system ones
-	LIST(APPEND CMAKE_PREFIX_PATH /opt/local /usr/local)
+  find_program(HOMEBREW_EXISTS "brew")
+  if(HOMEBREW_EXISTS)
+    execute_process(COMMAND brew --prefix OUTPUT_VARIABLE HOMEBREW_PREFIX)
+    string(STRIP "${HOMEBREW_PREFIX}" HOMEBREW_PREFIX)
+    message("-- Homebrew detected, setting CMAKE_PREFIX_PATH to ${HOMEBREW_PREFIX}")
+    LIST(APPEND CMAKE_PREFIX_PATH ${HOMEBREW_PREFIX})
+    # Explicitly add llvm, icu4c and libsoup@2 to prefix path
+    LIST(APPEND CMAKE_PREFIX_PATH ${HOMEBREW_PREFIX}/opt/llvm)
+    LIST(APPEND CMAKE_PREFIX_PATH ${HOMEBREW_PREFIX}/opt/icu4c)
+    LIST(APPEND CMAKE_PREFIX_PATH ${HOMEBREW_PREFIX}/opt/libsoup@2)
+  else()  
+    message("-- Setting CMAKE_PREFIX_PATH to prefer MacPorts and/or user-installed libraries over system ones")
+    LIST(APPEND CMAKE_PREFIX_PATH /opt/local /usr/local)
+  endif()
 	set(CMAKE_FIND_FRAMEWORK "LAST")
 	# except libstdc++ (only one linked via -l flag, not full path)
-	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L/usr/lib" CACHE STRING "" FORCE)
-	set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -L/usr/lib" CACHE STRING "" FORCE)
-	set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -L/usr/lib" CACHE STRING "" FORCE)
-	mark_as_advanced(CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L/usr/lib")
+	set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -L/usr/lib")
+	set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -L/usr/lib")
 
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_DARWIN_C_SOURCE")
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_DARWIN_C_SOURCE")
@@ -111,6 +153,7 @@ include(compiler-versions)
 
 if(WIN32)
   message("-- Win32 build detected, setting default features")
+  set(CMAKE_FIND_LIBRARY_SUFFIXES .dll ${CMAKE_FIND_LIBRARY_SUFFIXES})
   set(USE_COLORD OFF)
   set(USE_KWALLET OFF)
   set(BUILD_CMSTEST OFF)
@@ -125,7 +168,7 @@ endif(WIN32)
 #
 # Set package version
 #
-file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/src/") # the src/ subdirectory won't exist yet
+file(MAKE_DIRECTORY "${DARKTABLE_BINDIR}/") # the bin/ subdirectory won't exist yet
 
 # adds custom command to generate header containing version info.
 # takes 1 optional parameter - version override.
@@ -142,7 +185,7 @@ function(generate_version_gen_c)
 
   add_custom_target(
     create_version_gen ALL
-    COMMAND ${CMAKE_SOURCE_DIR}/tools/create_version_c.sh ${CMAKE_BINARY_DIR}/src/version_gen.c ${_VERSION}
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tools/create_version_c.sh ${DARKTABLE_BINDIR}/version_gen.c ${_VERSION}
     DEPENDS ${CMAKE_SOURCE_DIR}/tools/create_version_c.sh
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Updating version string (${_TYPE})"
@@ -150,11 +193,11 @@ function(generate_version_gen_c)
   )
 endfunction(generate_version_gen_c)
 
-if(DEFINED PROJECT_VERSION)
+if(DEFINED PROJECT_VERSION AND PROJECT_VERSION VERSION_GREATER 0)
   #project version is defined by -D on the cmake command line
   # only use that value, do not update it at make time
   generate_version_gen_c(${PROJECT_VERSION} "version override")
-else(DEFINED PROJECT_VERSION)
+else(DEFINED PROJECT_VERSION AND PROJECT_VERSION VERSION_GREATER 0)
   if(NOT SOURCE_PACKAGE) # i.e., a git checkout
     # this part is setting the corresponding CMake variable which gets used for example when creating a source package
     execute_process(
@@ -183,18 +226,18 @@ else(DEFINED PROJECT_VERSION)
       # but generate_version target expects it to be in build dir, so we need to copy it
       add_custom_target(
         create_version_gen ALL
-        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/src/version_gen.c ${CMAKE_BINARY_DIR}/src/version_gen.c
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/src/version_gen.c ${DARKTABLE_BINDIR}/version_gen.c
         DEPENDS ${CMAKE_SOURCE_DIR}/src/version_gen.c
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "Updating version string (source package) - ${PROJECT_VERSION}"
       )
     endif(NOT EXISTS ${CMAKE_SOURCE_DIR}/src/version_gen.c)
   endif(NOT SOURCE_PACKAGE)
-endif(DEFINED PROJECT_VERSION)
+endif(DEFINED PROJECT_VERSION AND PROJECT_VERSION VERSION_GREATER 0)
 
 # needed to make sure that version string is actually updated.
 add_custom_command(
-  OUTPUT ${CMAKE_BINARY_DIR}/src/version_gen.c
+  OUTPUT ${DARKTABLE_BINDIR}/version_gen.c
   COMMAND ${CMAKE_COMMAND} -E echo
   DEPENDS create_version_gen
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -203,7 +246,7 @@ add_custom_command(
 # WARNING: no target should reference version_gen.c directly. instead, they should add_dependencies(yourtarget generate_version)
 add_custom_target(
   generate_version ALL
-  DEPENDS ${CMAKE_BINARY_DIR}/src/version_gen.c
+  DEPENDS ${DARKTABLE_BINDIR}/version_gen.c
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 
@@ -219,17 +262,6 @@ endif()
 
 include(compiler-warnings)
 include(windows-macros)
-
-# Setting the runtime path works differently on OSX than on Linux or BSD.
-# Hence use a variable that maps those in the correct way for each OS.
-if(APPLE)
-    # The string "@loader_path" should end up in the executable as-is.
-    set(RPATH_DT "@loader_path")
-else(APPLE)
-    # Note that $ORIGIN is not a variable but has a special meaning at runtime.
-    # The string "$ORIGIN" should end up in the executable as-is.
-    set(RPATH_DT "$ORIGIN")
-endif(APPLE)
 
 # we need some external programs for building darktable
 message(STATUS "Looking for external programs")
@@ -287,7 +319,7 @@ if(TESTBUILD_OPENCL_PROGRAMS)
   endmacro()
 
   # 3.9 is the first version with which this works.
-  find_llvm("9;8;7;6.0;5.0;4.0;3.9")
+  find_llvm("13;12;11;10;9;8;7;6.0;5.0;4.0;3.9")
 
   if (LLVM_FOUND)
     message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
@@ -338,17 +370,17 @@ else(${jsonschema_BIN} STREQUAL "jsonschema_BIN-NOTFOUND")
   set(VALIDATE_JSON 1)
 endif(${jsonschema_BIN} STREQUAL "jsonschema_BIN-NOTFOUND")
 
-# we need an xslt interpreter to generate preferences_gen.h and darktablerc
+# we need an XSLT interpreter to generate preferences_gen.h and darktablerc
 find_program(Xsltproc_BIN xsltproc)
 if(${Xsltproc_BIN} STREQUAL "Xsltproc_BIN-NOTFOUND")
   message(STATUS "Missing xsltproc")
   find_program(Saxon_BIN saxon-xslt)
   if(${Saxon_BIN} STREQUAL "Saxon_BIN-NOTFOUND")
-    message(STATUS "Missing saxon-xslt")
-    message(STATUS "No xslt interpreter found")
+    message(STATUS "Missing Saxon-XSLT")
+    message(STATUS "No XSLT interpreter found")
     set(EXTERNAL_PROGRAMS_FOUND 0)
   else(${Saxon_BIN} STREQUAL "Saxon_BIN-NOTFOUND")
-    message(STATUS "Found saxon-xslt")
+    message(STATUS "Found Saxon-XSLT")
   endif(${Saxon_BIN} STREQUAL "Saxon_BIN-NOTFOUND")
 else(${Xsltproc_BIN} STREQUAL "Xsltproc_BIN-NOTFOUND")
   message(STATUS "Found xsltproc")
@@ -364,6 +396,15 @@ if(USE_XMLLINT)
     message(STATUS "Found xmllint")
   endif(${Xmllint_BIN} STREQUAL "Xmllint_BIN-NOTFOUND")
 endif(USE_XMLLINT)
+
+find_program(exiftool_BIN exiftool)
+if(${exiftool_BIN} STREQUAL "exiftool_BIN-NOTFOUND")
+  message(STATUS "Missing exiftool")
+  set(HAVE_EXIFTOOL 0)
+else()
+  message(STATUS "Found exiftool")
+  set(HAVE_EXIFTOOL 1)
+endif()
 
 # done with looking for programs
 if(NOT EXTERNAL_PROGRAMS_FOUND)
@@ -429,41 +470,12 @@ if(NOT SOURCE_PACKAGE AND NOT (CMAKE_VERSION VERSION_LESS 3.3) AND DEFINED ENV{_
   endif()
 endif()
 
-#
-# Test SSE level
-#
-# if(NOT USE_SSE_FLAG)
-# 	set(SSE_C_TESTS "sse4" "sse3" "sse2" "sse")
-# 	message("-- Checking SSE instructions support by current CPU")
-# 	foreach(sse_test ${SSE_C_TESTS})
-# 		if(NOT SSE_FOUND)
-# 			if(WIN32)
-# 				set(SSE_CHECK_COMMAND "FAILURE")
-# 			elseif(APPLE)
-# 				set(SSE_CHECK_COMMAND sysctl -a | grep ${sse_test})
-# 			else()#other os
-# 				set(SSE_CHECK_COMMAND grep ${sse_test} /proc/cpuinfo)
-# 			endif(WIN32)
-# 			execute_process(COMMAND ${SSE_CHECK_COMMAND} RESULT_VARIABLE ret_var OUTPUT_VARIABLE out_var)
-#
-# 			if(ret_var EQUAL 0) # grep returns 0 on success
-# 				set(SSE_FOUND TRUE)
-# 				message("--  ${sse_test} detected and working.")
-# 				set(USE_SSE_SET ${sse_test})
-# 			endif(ret_var EQUAL 0)
-#
-# 		endif(NOT SSE_FOUND)
-# 	endforeach(sse_test)
-# endif(NOT USE_SSE_FLAG)
-#
-# # set the SSE
-# if(USE_SSE_SET)
-# 	set(CMAKE_C_FLAGS ${CMAKE_C_FLAGS} "-m${USE_SSE_SET}")
-# endif(USE_SSE_SET)
-
-# setup some theme specific variables
-set(THEME hicolor)
-set(THEME_DIRECTORY "${CMAKE_INSTALL_DATAROOTDIR}/icons/${THEME}")
+if(BUILD_TESTING)
+  find_package(cmocka 1.1.0 CONFIG REQUIRED)
+  include(AddCMockaTest)
+  include(AddCMockaMockTest)
+  include_directories(${CMOCKA_INCLUDE_DIR} include)
+endif(BUILD_TESTING)
 
 # we need some specific functions:
 if(NOT WIN32)
@@ -472,18 +484,20 @@ if(NOT WIN32)
     else()
         add_definitions("-D_XOPEN_SOURCE=700")
     endif(CMAKE_SYSTEM MATCHES "SunOS.*")
-endif(NOT WIN32)
+else()
+    add_definitions("-D_USE_MATH_DEFINES")
+endif()
 
 # Set default component name - that way external modules like RawSpeed will install their
 # materials under the default component and not under 'Unspecified'
 set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME DTApplication)
 
 # lets continue into build directories
-include(data/supported_extensions.cmake) # this file needs to be included first as it gets amended in src/
-add_subdirectory(src) # src/ needs to be before data/ so that the correct CSS file gets installed
-add_subdirectory(data)
+include(data/supported_extensions.cmake) # this file needs to be included first as it gets amended in bin/
+add_subdirectory(src "${DARKTABLE_BINDIR}") # directory needs to be there before data directory so that the correct CSS file gets installed
+add_subdirectory(data "${DARKTABLE_DATADIR}")
 add_subdirectory(doc)
-add_subdirectory(tools)
+add_subdirectory(tools "${DARKTABLE_DATADIR}/tools")
 
 # This contains fixup_bundle
 # And adding a separate subderectory as a last one will make sure
@@ -500,3 +514,5 @@ configure_file(
 
 add_custom_target(uninstall
     COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake)
+
+feature_summary(WHAT ALL)

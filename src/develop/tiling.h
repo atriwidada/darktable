@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2011 ulrich pegelow.
+    Copyright (C) 2011-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -24,10 +24,14 @@
 
 typedef struct dt_develop_tiling_t
 {
-  /** memory requirement as a multiple of image buffer size */
+  /** memory requirement as a multiple of image buffer size (on host/CPU) */
   float factor;
-  /** maximum requirement for temporary buffers as a multiple of image buffer size */
+  /** memory requirement as a multiple of image buffer size (on GPU) */
+  float factor_cl;
+  /** maximum requirement for temporary buffers as a multiple of image buffer size (on host) */
   float maxbuf;
+  /** maximum requirement for temporary buffers as a multiple of image buffer size (on GPU) */
+  float maxbuf_cl;
   /** on-top memory requirement, with a size independent of input buffer */
   unsigned overhead;
   /** overlap needed between tiles (in pixels) */

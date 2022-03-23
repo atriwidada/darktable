@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2010 johannes hanika.
+    Copyright (C) 2010-2021 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -29,7 +29,10 @@
 #define DT_OPENCL_EVENTNAMELENGTH 64
 #define DT_OPENCL_MAX_EVENTS 256
 #define DT_OPENCL_MAX_ERRORS 5
-#define DT_OPENCL_MAX_INCLUDES 5
+#define DT_OPENCL_MAX_INCLUDES 7
+#define DT_OPENCL_VENDOR_AMD 4098
+#define DT_OPENCL_VENDOR_NVIDIA 4318
+#define DT_OPENCL_VENDOR_INTEL 0x8086u
 
 #include "common/darktable.h"
 
@@ -37,6 +40,7 @@
 
 #include "common/dlopencl.h"
 #include "common/dtpthread.h"
+#include "common/iop_profile.h"
 #include "control/conf.h"
 
 // #pragma GCC diagnostic push
@@ -116,6 +120,7 @@ typedef struct dt_opencl_device_t
   float benchmark;
   size_t memory_in_use;
   size_t peak_memory;
+  size_t tuned_available;
 } dt_opencl_device_t;
 
 struct dt_bilateral_cl_global_t;
@@ -173,10 +178,10 @@ typedef struct dt_opencl_t
 
   // global kernels for dwt filter.
   struct dt_dwt_cl_global_t *dwt;
-  
+
   // global kernels for heal filter.
   struct dt_heal_cl_global_t *heal;
-  
+
   // global kernels for colorspaces filter.
   struct dt_colorspaces_cl_global_t *colorspaces;
 
@@ -364,14 +369,19 @@ int dt_opencl_get_mem_context_id(cl_mem mem);
 void dt_opencl_memory_statistics(int devid, cl_mem mem, dt_opencl_memory_t action);
 
 /** check if image size fit into limits given by OpenCL runtime */
-int dt_opencl_image_fits_device(const int devid, const size_t width, const size_t height, const unsigned bpp,
+gboolean dt_opencl_image_fits_device(const int devid, const size_t width, const size_t height, const unsigned bpp,
                                 const float factor, const size_t overhead);
+/** check if buffer fits into limits given by OpenCL runtime */
+gboolean dt_opencl_buffer_fits_device(const int devid, const size_t required);
+
+/** get available memory for the device */
+cl_ulong dt_opencl_get_device_available(const int devid);
+
+/** get size of allocatable single buffer */
+cl_ulong dt_opencl_get_device_memalloc(const int devid);
 
 /** round size to a multiple of the value given in config parameter opencl_size_roundup */
 int dt_opencl_roundup(int size);
-
-/** get global memory of device */
-cl_ulong dt_opencl_get_max_global_mem(const int devid);
 
 /** get next free slot in eventlist and manage size of eventlist */
 cl_event *dt_opencl_events_get_slot(const int devid, const char *tag);
@@ -487,12 +497,20 @@ static inline int dt_opencl_update_settings(void)
 {
   return 0;
 }
-static inline int dt_opencl_image_fits_device(const int devid, const size_t width, const size_t height,
+static inline gboolean dt_opencl_image_fits_device(const int devid, const size_t width, const size_t height,
                                               const unsigned bpp, const float factor, const size_t overhead)
+{
+  return FALSE;
+}
+static inline gboolean dt_opencl_buffer_fits_device(const int devid, const size_t required)
+{
+  return FALSE;
+}
+static inline size_t dt_opencl_get_device_available(const int devid)
 {
   return 0;
 }
-static inline int dt_opencl_get_max_global_mem(const int devid)
+static inline size_t dt_opencl_get_device_memalloc(const int devid)
 {
   return 0;
 }

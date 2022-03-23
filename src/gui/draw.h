@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2010 johannes hanika.
+    Copyright (C) 2009-2022 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -24,13 +24,17 @@
 #include "config.h"
 #endif
 
-#include "common/darktable.h"
 #include "common/curve_tools.h"
+#include "common/darktable.h"
+#include "common/splines.h"
+#include "control/conf.h"
+#include "develop/develop.h"
 #include <cairo.h>
 #include <glib.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <gui/gtk.h>
 
 #ifndef M_PI
 #define M_PI 3.141592654
@@ -43,8 +47,21 @@ typedef struct dt_draw_curve_t
   CurveSample csample;
 } dt_draw_curve_t;
 
+/** set color based on gui overlay preference */
+static inline void dt_draw_set_color_overlay(cairo_t *cr, gboolean bright, double alpha)
+{
+  double amt;
+
+  if(bright)
+    amt = 0.5 + darktable.gui->overlay_contrast * 0.5;
+  else
+    amt = (1.0 - darktable.gui->overlay_contrast) * 0.5;
+
+  cairo_set_source_rgba(cr, darktable.gui->overlay_red * amt, darktable.gui->overlay_green * amt, darktable.gui->overlay_blue * amt, alpha);
+}
+
 /** draws a rating star
-*/
+ */
 static inline void dt_draw_star(cairo_t *cr, float x, float y, float r1, float r2)
 {
   const float d = 2.0 * M_PI * 0.1f;
@@ -110,15 +127,23 @@ static inline void dt_draw_grid_zoomed(cairo_t *cr, const int num, const float l
   }
 }
 
-static inline void dt_draw_loglog_grid(cairo_t *cr, const int num, const int left, const int top,
-                                       const int right, const int bottom, const float base)
+#ifdef _OPENMP
+#pragma omp declare simd uniform(base)
+#endif
+static inline float dt_log_scale_axis(const float x, const float base)
+{
+  return logf(x * (base - 1.0f) + 1.f) / logf(base);
+}
+
+static inline void dt_draw_loglog_grid(cairo_t *cr, const int num, const int left, const int top, const int right,
+                                       const int bottom, const float base)
 {
   float width = right - left;
   float height = bottom - top;
 
   for(int k = 1; k < num; k++)
   {
-    const float x = logf(k / (float)num * (base - 1.0f) + 1) / logf(base);
+    const float x = dt_log_scale_axis(k / (float)num, base);
     dt_draw_line(cr, left + x * width, top, left + x * width, bottom);
     cairo_stroke(cr);
     dt_draw_line(cr, left, top + x * height, right, top + x * height);
@@ -127,14 +152,14 @@ static inline void dt_draw_loglog_grid(cairo_t *cr, const int num, const int lef
 }
 
 static inline void dt_draw_semilog_x_grid(cairo_t *cr, const int num, const int left, const int top,
-                                       const int right, const int bottom, const float base)
+                                          const int right, const int bottom, const float base)
 {
   float width = right - left;
   float height = bottom - top;
 
   for(int k = 1; k < num; k++)
   {
-    const float x = logf(k / (float)num * (base - 1.0f) + 1) / logf(base);
+    const float x = dt_log_scale_axis(k / (float)num, base);
     dt_draw_line(cr, left + x * width, top, left + x * width, bottom);
     cairo_stroke(cr);
     dt_draw_line(cr, left, top + k / (float)num * height, right, top + k / (float)num * height);
@@ -143,14 +168,14 @@ static inline void dt_draw_semilog_x_grid(cairo_t *cr, const int num, const int 
 }
 
 static inline void dt_draw_semilog_y_grid(cairo_t *cr, const int num, const int left, const int top,
-                                       const int right, const int bottom, const float base)
+                                          const int right, const int bottom, const float base)
 {
   float width = right - left;
   float height = bottom - top;
 
   for(int k = 1; k < num; k++)
   {
-    const float x = logf(k / (float)num * (base - 1.0f) + 1) / logf(base);
+    const float x = dt_log_scale_axis(k / (float)num, base);
     dt_draw_line(cr, left + k / (float)num * width, top, left + k / (float)num * width, bottom);
     cairo_stroke(cr);
     dt_draw_line(cr, left, top + x * height, right, top + x * height);
@@ -160,27 +185,28 @@ static inline void dt_draw_semilog_y_grid(cairo_t *cr, const int num, const int 
 
 
 static inline void dt_draw_waveform_lines(cairo_t *cr, const int left, const int top, const int right,
-                                          const int bottom)
+                                          const int bottom, const gboolean horizontal)
 {
-  //   float width = right - left;
-  float height = bottom - top;
-
-  int num = 9, middle = 5;
+  float width = right - left;
+  const float height = bottom - top;
+  const int num = 9, middle = 5, white = 1;
+  // FIXME: should this vary with ppd?
+  const double dashes = 4.0;
 
   cairo_save(cr);
 
+  // FIXME: should be using DT_PIXEL_APPLY_DPI()?
+  const double wd = cairo_get_line_width(cr);
   for(int k = 1; k < num; k++)
   {
-    if(k == middle) continue;
-    dt_draw_line(cr, left, top + k / (float)num * height, right, top + k / (float)num * height);
+    cairo_set_dash(cr, &dashes, k == white || k == middle, 0);
+    cairo_set_line_width(cr, k == white ? wd * 3 : k == middle ? wd * 2 : wd);
+    if(horizontal)
+      dt_draw_line(cr, left, top + k / (float)num * height, right, top + k / (float)num * height);
+    else
+      dt_draw_line(cr, right - k / (float)num * width, top, right - k / (float)num * width, bottom);
     cairo_stroke(cr);
   }
-
-  double dashes = 4.0;
-  cairo_set_dash(cr, &dashes, 1, 0);
-
-  dt_draw_line(cr, left, top + middle / (float)num * height, right, top + middle / (float)num * height);
-  cairo_stroke(cr);
 
   cairo_restore(cr);
 }
@@ -261,33 +287,60 @@ static inline void dt_draw_curve_set_point(dt_draw_curve_t *c, const int num, co
   c->c.m_anchors[num].y = y;
 }
 
-static inline void dt_draw_curve_calc_values(dt_draw_curve_t *c, const float min, const float max,
-                                             const int res, float *x, float *y)
+static inline void dt_draw_curve_smaple_values(dt_draw_curve_t *c, const float min, const float max, const int res,
+                                               float *x, float *y)
 {
-  c->csample.m_samplingRes = res;
-  c->csample.m_outputRes = 0x10000;
-  CurveDataSample(&c->c, &c->csample);
   if(x)
   {
 #ifdef _OPENMP
-#pragma omp parallel for SIMD() default(none) \
-    dt_omp_firstprivate(res) \
-    shared(x) \
-    schedule(static)
+#pragma omp parallel for SIMD() default(none) dt_omp_firstprivate(res) shared(x) schedule(static)
 #endif
     for(int k = 0; k < res; k++) x[k] = k * (1.0f / res);
   }
   if(y)
   {
 #ifdef _OPENMP
-#pragma omp parallel for SIMD() default(none) \
-    dt_omp_firstprivate(min, max, res) \
-    shared(y, c) \
-    schedule(static)
+#pragma omp parallel for SIMD() default(none) dt_omp_firstprivate(min, max, res) shared(y, c) schedule(static)
 #endif
     for(int k = 0; k < res; k++) y[k] = min + (max - min) * c->csample.m_Samples[k] * (1.0f / 0x10000);
   }
 }
+
+static inline void dt_draw_curve_calc_values(dt_draw_curve_t *c, const float min, const float max, const int res,
+                                             float *x, float *y)
+{
+  c->csample.m_samplingRes = res;
+  c->csample.m_outputRes = 0x10000;
+  CurveDataSample(&c->c, &c->csample);
+  dt_draw_curve_smaple_values(c, min, max, res, x, y);
+}
+
+static inline void dt_draw_curve_calc_values_V2_nonperiodic(dt_draw_curve_t *c, const float min, const float max,
+                                                            const int res, float *x, float *y)
+{
+  c->csample.m_samplingRes = res;
+  c->csample.m_outputRes = 0x10000;
+  CurveDataSampleV2(&c->c, &c->csample);
+  dt_draw_curve_smaple_values(c, min, max, res, x, y);
+}
+
+static inline void dt_draw_curve_calc_values_V2_periodic(dt_draw_curve_t *c, const float min, const float max,
+                                                         const int res, float *x, float *y)
+{
+  c->csample.m_samplingRes = res;
+  c->csample.m_outputRes = 0x10000;
+  CurveDataSampleV2Periodic(&c->c, &c->csample);
+  dt_draw_curve_smaple_values(c, min, max, res, x, y);
+}
+
+static inline void dt_draw_curve_calc_values_V2(dt_draw_curve_t *c, const float min, const float max,
+                                                const int res, float *x, float *y, const gboolean periodic)
+{
+  if(periodic)
+    dt_draw_curve_calc_values_V2_periodic(c, min, max, res, x, y);
+  else
+    dt_draw_curve_calc_values_V2_nonperiodic(c, min, max, res, x, y);
+ }
 
 static inline float dt_draw_curve_calc_value(dt_draw_curve_t *c, const float x)
 {
@@ -317,7 +370,8 @@ static inline int dt_draw_curve_add_point(dt_draw_curve_t *c, const float x, con
 }
 
 // linear x linear y
-static inline void dt_draw_histogram_8_linxliny(cairo_t *cr, const uint32_t *hist, int32_t channels, int32_t channel)
+static inline void dt_draw_histogram_8_linxliny(cairo_t *cr, const uint32_t *hist, int32_t channels,
+                                                int32_t channel)
 {
   cairo_move_to(cr, 0, 0);
   for(int k = 0; k < 256; k++) cairo_line_to(cr, k, hist[channels * k + channel]);
@@ -334,8 +388,8 @@ static inline void dt_draw_histogram_8_zoomed(cairo_t *cr, const uint32_t *hist,
   for(int k = 0; k < 256; k++)
   {
     const float value = ((float)hist[channels * k + channel] - zoom_offset_y) * zoom_factor;
-    const float hist_value = value<0 ? 0.f : value;
-    cairo_line_to(cr, ((float)k - zoom_offset_x) * zoom_factor, linear ? hist_value : log(1.0f + hist_value));
+    const float hist_value = value < 0 ? 0.f : value;
+    cairo_line_to(cr, ((float)k - zoom_offset_x) * zoom_factor, linear ? hist_value : logf(1.0f + hist_value));
   }
   cairo_line_to(cr, (255.f - zoom_offset_x), -zoom_offset_y * zoom_factor);
   cairo_close_path(cr);
@@ -343,7 +397,8 @@ static inline void dt_draw_histogram_8_zoomed(cairo_t *cr, const uint32_t *hist,
 }
 
 // log x (scalable) & linear y
-static inline void dt_draw_histogram_8_logxliny(cairo_t *cr, const uint32_t *hist, int32_t channels, int32_t channel, float base_log)
+static inline void dt_draw_histogram_8_logxliny(cairo_t *cr, const uint32_t *hist, int32_t channels,
+                                                int32_t channel, float base_log)
 {
   cairo_move_to(cr, 0, 0);
   for(int k = 0; k < 256; k++)
@@ -358,7 +413,8 @@ static inline void dt_draw_histogram_8_logxliny(cairo_t *cr, const uint32_t *his
 }
 
 // log x (scalable) & log y
-static inline void dt_draw_histogram_8_logxlogy(cairo_t *cr, const uint32_t *hist, int32_t channels, int32_t channel, float base_log)
+static inline void dt_draw_histogram_8_logxlogy(cairo_t *cr, const uint32_t *hist, int32_t channels,
+                                                int32_t channel, float base_log)
 {
   cairo_move_to(cr, 0, 0);
   for(int k = 0; k < 256; k++)
@@ -373,7 +429,8 @@ static inline void dt_draw_histogram_8_logxlogy(cairo_t *cr, const uint32_t *his
 }
 
 // linear x log y
-static inline void dt_draw_histogram_8_linxlogy(cairo_t *cr, const uint32_t *hist, int32_t channels, int32_t channel)
+static inline void dt_draw_histogram_8_linxlogy(cairo_t *cr, const uint32_t *hist, int32_t channels,
+                                                int32_t channel)
 {
   cairo_move_to(cr, 0, 0);
   for(int k = 0; k < 256; k++) cairo_line_to(cr, k, logf(1.0 + hist[channels * k + channel]));
@@ -383,21 +440,23 @@ static inline void dt_draw_histogram_8_linxlogy(cairo_t *cr, const uint32_t *his
 }
 
 // log x (scalable)
-static inline void dt_draw_histogram_8_log_base(cairo_t *cr, const uint32_t *hist, int32_t channels, int32_t channel, const gboolean linear, float base_log)
+static inline void dt_draw_histogram_8_log_base(cairo_t *cr, const uint32_t *hist, int32_t channels,
+                                                int32_t channel, const gboolean linear, float base_log)
 {
 
   if(linear) // linear y
     dt_draw_histogram_8_logxliny(cr, hist, channels, channel, base_log);
-  else  // log y
+  else // log y
     dt_draw_histogram_8_logxlogy(cr, hist, channels, channel, base_log);
 }
 
 // linear x
-static inline void dt_draw_histogram_8(cairo_t *cr, const uint32_t *hist, int32_t channels, int32_t channel, const gboolean linear)
+static inline void dt_draw_histogram_8(cairo_t *cr, const uint32_t *hist, int32_t channels, int32_t channel,
+                                       const gboolean linear)
 {
   if(linear) // linear y
     dt_draw_histogram_8_linxliny(cr, hist, channels, channel);
-  else  // log y
+  else // log y
     dt_draw_histogram_8_linxlogy(cr, hist, channels, channel);
 }
 
@@ -434,6 +493,32 @@ static inline void dt_cairo_perceptual_gradient(cairo_pattern_t *grad, double al
   // Create a linear gradient from black to white
   cairo_pattern_add_color_stop_rgba(grad, 0.0, 0.0, 0.0, 0.0, alpha);
   cairo_pattern_add_color_stop_rgba(grad, 1.0, 1.0, 1.0, 1.0, alpha);
+}
+
+static inline GdkPixbuf *dt_draw_paint_to_pixbuf
+ (GtkWidget *widget, const guint pixbuf_size, const int flags,
+  void (*dtgtk_cairo_paint_fct)(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data))
+{
+  GdkRGBA fg_color;
+  GtkStyleContext *context = gtk_widget_get_style_context(widget);
+  GtkStateFlags state = gtk_widget_get_state_flags(widget);
+  gtk_style_context_get_color(context, state, &fg_color);
+
+  const int dim = DT_PIXEL_APPLY_DPI(pixbuf_size);
+  cairo_surface_t *cst = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, dim, dim);
+  cairo_t *cr = cairo_create(cst);
+  gdk_cairo_set_source_rgba(cr, &fg_color);
+  (*dtgtk_cairo_paint_fct)(cr, 0, 0, dim, dim, flags | CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);
+  cairo_destroy(cr);
+  uint8_t *data = cairo_image_surface_get_data(cst);
+  dt_draw_cairo_to_gdk_pixbuf(data, dim, dim);
+  const size_t size = (size_t)dim * dim * 4;
+  uint8_t *buf = (uint8_t *)malloc(size);
+  memcpy(buf, data, size);
+  GdkPixbuf *pixbuf = gdk_pixbuf_new_from_data(buf, GDK_COLORSPACE_RGB, TRUE, 8, dim, dim, dim * 4,
+                                               (GdkPixbufDestroyNotify)free, NULL);
+  cairo_surface_destroy(cst);
+  return pixbuf;
 }
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh

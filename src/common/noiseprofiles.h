@@ -1,7 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2013 johannes hanika.
-    copyright (c) 2015 tobias ellinghaus.
+    Copyright (C) 2013-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -29,8 +28,8 @@ typedef struct dt_noiseprofile_t
   char *maker;
   char *model;
   int iso;
-  float a[3]; // poissonian part
-  float b[3]; // gaussian part
+  dt_aligned_pixel_t a; // poissonian part; use 4 aligned instead of 3 elements to aid vectorization
+  dt_aligned_pixel_t b; // gaussian part
 }
 dt_noiseprofile_t;
 

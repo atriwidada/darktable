@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2010 johannes hanika.
+    Copyright (C) 2009-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -53,17 +53,20 @@ int dt_film_open_recent(const int32_t num);
 int dt_film_import(const char *dirname);
 /** constructs the lighttable/query setting for this film, respecting stars and filters. */
 void dt_film_set_query(const int32_t id);
+/** get id associated with filmroll */
+int32_t dt_film_get_id(const char *folder);
 /** removes this film and all its images from db. */
 void dt_film_remove(const int id);
 /** checks if film is empty */
-int dt_film_is_empty(const int id);
+gboolean dt_film_is_empty(const int id);
 /** Creating a new filmroll */
 int dt_film_new(dt_film_t *film, const char *directory);
 /** removes all empty film rolls. */
 void dt_film_remove_empty();
 /** gets all image ids in film. the returned GList has to be freed with g_list_free(). */
 GList *dt_film_get_image_ids(const int filmid);
-
+// initialize film folder status
+void dt_film_set_folder_status();
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

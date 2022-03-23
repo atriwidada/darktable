@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2017 Heiko Bauke.
+    Copyright (C) 2017-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -101,4 +101,94 @@ static int gauss_solve(double *A, double *b, int n)
   if((err_code = gauss_make_triangular(A, p, n))) gauss_solve_triangular(A, p, b, n);
   free(p);
   return err_code;
+}
+
+
+__DT_CLONE_TARGETS__
+static inline int transpose_dot_matrix(double *const restrict A, // input
+                                       double *const restrict A_square, // output
+                                       const size_t m, const size_t n)
+{
+  // Construct the square symmetrical definite positive matrix A' A,
+
+  for(size_t i = 0; i < n; ++i)
+    for(size_t j = 0; j < n; ++j)
+    {
+      double sum = 0.0;
+      for(size_t k = 0; k < m; ++k)
+        sum += A[k * n + i] * A[k * n + j];
+
+      A_square[i * n + j] = sum;
+    }
+
+  return 1;
+}
+
+
+__DT_CLONE_TARGETS__
+static inline int transpose_dot_vector(double *const restrict A, // input
+                                       double *const restrict y, // input
+                                       double *const restrict y_square, // output
+                                       const size_t m, const size_t n)
+{
+  // Construct the vector A' y
+  for(size_t i = 0; i < n; ++i)
+  {
+    double sum = 0.0;
+    for(size_t k = 0; k < m; ++k)
+      sum += A[k * n + i] * y[k];
+
+    y_square[i] = sum;
+  }
+
+  return 1;
+}
+
+
+static inline int pseudo_solve_gaussian(double *const restrict A,
+                                        double *const restrict y,
+                                        const size_t m, const size_t n, const int checks)
+{
+  // Solve the weighted linear problem w A'A x = w A' y with the over-constrained rectanguler matrix A
+  // of dimension m × n (m >= n) and w a vector of weights, by the least squares method
+  int valid = 1;
+
+  if(m < n)
+  {
+    fprintf(stderr, "pseudo solve: cannot cast %zu x %zu matrix\n", m, n);
+    return 0;
+  }
+
+  double *const restrict A_square = dt_alloc_align(64, n * n * sizeof(double));
+  double *const restrict y_square = dt_alloc_align(64, n * sizeof(double));
+
+  #ifdef _OPENMP
+  #pragma omp parallel sections
+  #endif
+  {
+    #ifdef _OPENMP
+    #pragma omp section
+    #endif
+    {
+      // Prepare the least squares matrix = A' A
+      transpose_dot_matrix(A, A_square, m, n);
+    }
+
+    #ifdef _OPENMP
+    #pragma omp section
+    #endif
+    {
+      // Prepare the y square vector = A' y
+      transpose_dot_vector(A, y, y_square, m, n);
+    }
+  }
+
+  // Solve A' A x = A' y for x
+  valid = gauss_solve(A_square, y_square, n);
+  for(size_t k = 0; k < n; k++) y[k] = y_square[k];
+
+  dt_free_align(y_square);
+  dt_free_align(A_square);
+
+  return valid;
 }

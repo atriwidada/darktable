@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2014 Pascal de Bruijn
+# Copyright (c) 2014-2022 darktable developers.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -36,47 +36,35 @@ then
   exit
 fi
 
-MAKE=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.Make ' | sed 's#Exif.Image.Make *##g')
-MODEL=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.Model ' | sed 's#Exif.Image.Model *##g')
-UNIQUE_CAMERA_MODEL=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.UniqueCameraModel ' | sed 's#Exif.Image.UniqueCameraModel *##g')
+MAKE=$(get_exif_key "$DNG" Exif.Image.Make)
+MODEL=$(get_exif_key "$DNG" Exif.Image.Model)
+UNIQUE_CAMERA_MODEL=$(get_exif_key "$DNG" Exif.Image.UniqueCameraModel)
 
 ISO=$(get_image_iso "$DNG")
 
 # This doesn't work with two name makes but there aren't any active ones
-ID_MAKE=${MAKE:0:1}$(echo "${MAKE:1}" | cut -d " " -f 1 | tr "[:upper:]" "[:lower:]")
+ID_MAKE=$(get_image_camera_maker "$DNG")
+ID_MODEL=$(get_image_camera_model "$DNG")
 
-ID_MODEL=$MODEL
-first_maker=$(echo "$MAKE" | cut -d " " -f 1)
-first_model=$(echo "$MODEL" | cut -d " " -f 1)
-if [ "$first_maker" = "$first_model" ]; then
-  ID_MODEL=$(echo "$MODEL" | cut -d " " -f 2-)
-fi
+MANGLED_MAKE_MODEL=$(echo "$ID_MAKE" "$ID_MODEL")
 
-MANGLED_MAKE_MODEL=$(echo "$MAKE" "$MODEL" | sed 's# CORPORATION##gi' | sed 's#Canon Canon#Canon#g' | sed 's#NIKON NIKON#NIKON#g' | sed 's#PENTAX PENTAX#PENTAX#g' | sed 's#OLYMPUS IMAGING CORP.#OLYMPUS#g' | sed 's#OLYMPUS OPTICAL CO.,LTD#OLYMPUS#g' | sed 's# EASTMAN KODAK COMPANY#KODAK#g')
+SOFTWARE=$(exiv2 -Pv -K Exif.Image.Software "$DNG" 2>/dev/null)
 
-SOFTWARE=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.Software ' | awk '{print $2 " " $3 " " $4 " " $5 " " $6}')
+ILLUMINANT=$(exiv2 -Pv -K Exif.Image.CalibrationIlluminant2 "$DNG" 2>/dev/null)
+MATRIX=($(exiv2 -Pv -K Exif.Image.ColorMatrix2 "$DNG" 2>/dev/null | sed 's#/10000##g'))
 
-ILLUMINANT=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.CalibrationIlluminant2 ' | awk '{print $2}')
-MATRIX_XR=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.ColorMatrix2 ' | sed 's#/10000##g' | awk '{print $2}')
-MATRIX_XG=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.ColorMatrix2 ' | sed 's#/10000##g' | awk '{print $3}')
-MATRIX_XB=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.ColorMatrix2 ' | sed 's#/10000##g' | awk '{print $4}')
-MATRIX_YR=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.ColorMatrix2 ' | sed 's#/10000##g' | awk '{print $5}')
-MATRIX_YG=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.ColorMatrix2 ' | sed 's#/10000##g' | awk '{print $6}')
-MATRIX_YB=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.ColorMatrix2 ' | sed 's#/10000##g' | awk '{print $7}')
-MATRIX_ZR=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.ColorMatrix2 ' | sed 's#/10000##g' | awk '{print $8}')
-MATRIX_ZG=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.ColorMatrix2 ' | sed 's#/10000##g' | awk '{print $9}')
-MATRIX_ZB=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.Image.ColorMatrix2 ' | sed 's#/10000##g' | awk '{print $10}')
+# FIXME: uses only the first value of possibly different multiple ones
+WHITE=$(exiv2 -Pv -K Exif.SubImage1.WhiteLevel "$DNG" 2>/dev/null | awk '{print $1}' | bc)
+BLACK=$(exiv2 -Pv -K Exif.SubImage1.BlackLevel "$DNG" 2>/dev/null | awk '{print $1}' | bc)
 
-WHITE=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.SubImage1.WhiteLevel ' | awk '{print $2}' | bc)
-BLACK=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.SubImage1.BlackLevel ' | awk '{print $2}' | bc)
+CFA_PATTERN_DIM=$(exiv2 -Pv -K Exif.SubImage1.CFARepeatPatternDim "$DNG" 2>/dev/null)
+CFA_PATTERN_WIDTH=$(echo $CFA_PATTERN_DIM | awk '{print $1}')
+CFA_PATTERN_HEIGHT=$(echo $CFA_PATTERN_DIM | awk '{print $2}')
 
-CFA_PATTERN_WIDTH=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.SubImage1.CFARepeatPatternDim ' | awk '{print $2}')
-CFA_PATTERN_HEIGHT=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.SubImage1.CFARepeatPatternDim ' | awk '{print $3}')
+CFA_PATTERN=($(exiv2 -Pv -K Exif.SubImage1.CFAPattern "$DNG" 2>/dev/null | sed 's#0#RED#g; s#1#GREEN#g; s#2#BLUE#g'))
 
-CFA_PATTERN=($(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.SubImage1.CFAPattern ' | awk '{$1=""; print $0}' | sed 's#0#RED#g; s#1#GREEN#g; s#2#BLUE#g'))
-
-IMG_WIDTH=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.SubImage1.ImageWidth ' | awk '{print $2}')
-IMG_LENGTH=$(exiv2 -Pkt "$DNG" 2>/dev/null | grep 'Exif.SubImage1.ImageLength ' | awk '{print $2}')
+IMG_WIDTH=$(exiv2 -Pv -K Exif.SubImage1.ImageWidth "$DNG" 2>/dev/null)
+IMG_LENGTH=$(exiv2 -Pv -K Exif.SubImage1.ImageLength "$DNG" 2>/dev/null)
 
 if [[ $IMG_WIDTH -gt $IMG_LENGTH ]]; then
   IMG_LONG=$IMG_WIDTH
@@ -112,14 +100,6 @@ echo "DNG Illuminant : $ILLUMINANT (should be 21)"
 echo ""
 
 echo ""
-echo "$ nano -w src/external/adobe_coeff.c"
-echo ""
-echo "{ \"$ID_MAKE $ID_MODEL\", { $MATRIX_XR,$MATRIX_XG,$MATRIX_XB,$MATRIX_YR,$MATRIX_YG,$MATRIX_YB,$MATRIX_ZR,$MATRIX_ZG,$MATRIX_ZB } },"
-echo ""
-echo "$ git commit -a -m \"adobe_coeff: $MANGLED_MAKE_MODEL support\" --author \"$AUTHOR\""
-echo ""
-
-echo ""
 echo "$ nano -w src/external/rawspeed/data/cameras.xml (mind the tabs)"
 echo ""
 echo -e "\t<Camera make=\"$MAKE\" model=\"$MODEL\"$MODE>"
@@ -129,7 +109,7 @@ if [[ $MAKE == FUJIFILM && $CFA_PATTERN_WIDTH == 6 && $CFA_PATTERN_HEIGHT == 6 ]
   echo -e "\t\t<CFA2 width=\"$CFA_PATTERN_WIDTH\" height=\"$CFA_PATTERN_HEIGHT\">"
   # The DNG's CFA pattern is mysteriously shifted horizontally for
   # 14-bit x-trans chips (despite it being stored unshifted in the raw
-  # file). Identify 14-bit cips by their max white value.
+  # file). Identify 14-bit chips by their max white value.
 
   # FIXME: this is definitively wrong. from rawspeed, DngDecoder::parseCFA():
   # the cfa is specified relative to the ActiveArea. we want it relative (0,0)
@@ -161,6 +141,13 @@ fi
 
 echo -e "\t\t<Crop x=\"0\" y=\"0\" width=\"0\" height=\"0\"/>"
 echo -e "\t\t<Sensor black=\"$BLACK\" white=\"$WHITE\"$SENSOR_ISO/>"
+echo -e "\t\t<ColorMatrices>"
+echo -e "\t\t\t<ColorMatrix planes=\"3\">"
+echo -e "\t\t\t\t<ColorMatrixRow plane=\"0\">${MATRIX[0]} ${MATRIX[1]} ${MATRIX[2]}</ColorMatrixRow>"
+echo -e "\t\t\t\t<ColorMatrixRow plane=\"1\">${MATRIX[3]} ${MATRIX[4]} ${MATRIX[5]}</ColorMatrixRow>"
+echo -e "\t\t\t\t<ColorMatrixRow plane=\"2\">${MATRIX[6]} ${MATRIX[7]} ${MATRIX[8]}</ColorMatrixRow>"
+echo -e "\t\t\t</ColorMatrix>"
+echo -e "\t\t</ColorMatrices>"
 echo -e "\t</Camera>"
 echo ""
 

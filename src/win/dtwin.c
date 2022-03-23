@@ -1,7 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2012 johannes hanika.
-    copyright (c) 2010--2012 tobias ellinghaus.
+    Copyright (C) 2017-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -19,6 +18,14 @@
 #include "dtwin.h"
 #include <setjmp.h>
 #include <windows.h>
+
+// Required by (at least) clang 10.0 as packaged by MSYS2 MinGW64.
+// This platform combination is needed for dt appveyor build.
+#ifdef __clang__
+#ifdef __MINGW32__ // 64-bit subsystem also sets this symbol
+#include <errno.h>
+#endif
+#endif
 
 const wchar_t *dtwin_get_locale()
 {
@@ -361,14 +368,13 @@ boolean dt_win_file_trash(GFile *file, GCancellable *cancellable, GError **error
   if(success && op.fAnyOperationsAborted)
   {
     if(cancellable && !g_cancellable_is_cancelled(cancellable)) g_cancellable_cancel(cancellable);
-    g_set_error(error, G_IO_ERROR, g_io_error_from_errno(ECANCELED),
-                g_strdup_printf("Unable to trash file %s: %s", file, ECANCELED), g_file_get_parse_name(file),
-                g_strerror(ECANCELED));
+    g_set_error(error, G_IO_ERROR, g_io_error_from_errno(ECANCELED), "Unable to trash file %s: %s",
+                g_file_get_parse_name(file), g_strerror(ECANCELED));
     success = FALSE;
   }
   else if(!success)
-    g_set_error(error, G_IO_ERROR, g_io_error_from_errno(0), g_strdup_printf("Unable to trash file %s", file),
-                g_file_get_parse_name(file), g_strerror(0));
+    g_set_error(error, G_IO_ERROR, g_io_error_from_errno(0), "Unable to trash file %s",
+                g_file_get_parse_name(file));
 
   g_free(wfilename);
   return success;

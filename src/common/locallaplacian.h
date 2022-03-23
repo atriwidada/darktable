@@ -1,7 +1,7 @@
 #pragma once
 /*
     This file is part of darktable,
-    copyright (c) 2016 johannes hanika.
+    Copyright (C) 2016-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -50,7 +50,7 @@ void local_laplacian_internal(
     float *const out,           // output buffer with colour
     const int wd,               // width and
     const int ht,               // height of the input buffer
-    const float sigma,          // user param: separate shadows/midtones/highlights
+    const float sigma,          // user param: separate shadows/mid-tones/highlights
     const float shadows,        // user param: lift shadows
     const float highlights,     // user param: compress highlights
     const float clarity,        // user param: increase clarity/local contrast
@@ -63,7 +63,7 @@ void local_laplacian(
     float *const out,           // output buffer with colour
     const int wd,               // width and
     const int ht,               // height of the input buffer
-    const float sigma,          // user param: separate shadows/midtones/highlights
+    const float sigma,          // user param: separate shadows/mid-tones/highlights
     const float shadows,        // user param: lift shadows
     const float highlights,     // user param: compress highlights
     const float clarity,        // user param: increase clarity/local contrast
@@ -86,7 +86,7 @@ void local_laplacian_sse2(
     float *const out,           // output buffer with colour
     const int wd,               // width and
     const int ht,               // height of the input buffer
-    const float sigma,          // user param: separate shadows/midtones/highlights
+    const float sigma,          // user param: separate shadows/mid-tones/highlights
     const float shadows,        // user param: lift shadows
     const float highlights,     // user param: compress highlights
     const float clarity,        // user param: increase clarity/local contrast

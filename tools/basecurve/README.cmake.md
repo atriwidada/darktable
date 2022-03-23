@@ -26,10 +26,6 @@ The tool has some known limitations:
    about ICC profiles (not even AdobeRGB).
  - the tool is happily confused by JPEG files that are portrait rotated, and their
    raw is not. The helper script tries to auto correct that during the conversion step.
- - the current procedure relies on dcraw which may not have a correct color matrix
-   for your camera. Check if `darktable/src/external/adobe_coeff.c` and
-   `dcraw.c::adobe_coeff::table` do match. If not, copy darktable's one. Beware
-   both tables do not use the same camera names.
 
 ## Requirements
 
@@ -74,7 +70,7 @@ export PATH="$PATH:@CMAKE_INSTALL_FULL_LIBEXECDIR@/darktable/tools/"
 
 _darktable-curve-tool-helper_ will look for corresponding JPEG files by itself; if no
 corresponding JPEG file is found, the embedded JPEG file from the raw is extracted.
- 
+
 
 ### Computing the curves
 
@@ -107,7 +103,7 @@ The following chapters will explain in depth all the steps required for
 determining a curve with _darktable-curve-tool_ alone
 
 
-### Creating the PPM versions of your JPEG and raw files 
+### Creating the PPM versions of your JPEG and raw files
 
 
 Let's say you have FILE.RAW (eg: .NEF/.CR2) and FILE.JPG
@@ -125,7 +121,7 @@ Let's now convert the JPEG file to the same convenient format:
     $ convert FILE.JPG FILE-jpeg.ppm
 
 This creates another PPM file. But this new PPM file contains the data that your
-in camera JPEG engine has output. This step may alos involve a rotation of your
+in camera JPEG engine has output. This step may also involve a rotation of your
 image so that the PPM from the raw and the JPEG share the same orientation.
 
 

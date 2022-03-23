@@ -21,7 +21,6 @@ set(LUA_SOURCES
 	"src/lzio.c"
 	"src/lauxlib.c"
 	"src/lbaselib.c"
-	"src/lbitlib.c"
 	"src/lcorolib.c"
 	"src/ldblib.c"
 	"src/liolib.c"
@@ -52,7 +51,7 @@ else(APPLE)
   target_link_libraries(lua dl)
 endif(WIN32)
 
-# 
+#
 # SYSLIBS="-Wl,-E -ldl -lreadline"
 # SYSLIBS="-lreadline"
 

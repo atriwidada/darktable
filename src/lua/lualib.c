@@ -1,6 +1,6 @@
 /*
    This file is part of darktable,
-   copyright (c) 2015 Jeremy Rosen
+   Copyright (C) 2015-2020 darktable developers.
 
    darktable is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -127,7 +127,7 @@ static int async_lib_call(lua_State * L)
   const char* event = lua_tostring(L,1);
   dt_lib_module_t * module = *(dt_lib_module_t**)lua_touserdata(L,2);
   dt_lua_module_entry_push(L,"lib",module->plugin_name);
-  lua_getuservalue(L,-1);
+  lua_getiuservalue(L, -1, 1);
   lua_getfield(L,-1,event);
   if(lua_isnoneornil(L,-1)) {
     lua_pop(L,7);
@@ -164,7 +164,6 @@ static void view_leave_wrapper(struct dt_lib_module_t *self,struct dt_view_t *ol
 
 static dt_lib_module_t ref_lib = {
   .module = NULL,
-  .dt = &darktable,
   .data = NULL,
   .plugin_name ={ 0 },
   .widget = NULL,
@@ -192,7 +191,6 @@ static dt_lib_module_t ref_lib = {
   .init_presets = NULL,
   .init_key_accels = NULL,
   .connect_key_accels = NULL,
-  .accel_closures = NULL,
   .reset_button = NULL,
   .presets_button = NULL,
   .view_enter = view_enter_wrapper,
@@ -211,7 +209,7 @@ static int register_lib(lua_State *L)
   dt_lua_lib_register(L, lib);
   /* push the object on the stack to have its metadata */
   dt_lua_module_entry_push(L,"lib",lib->plugin_name);
-  lua_getuservalue(L,-1);
+  lua_getiuservalue(L, -1, 1);
   lua_pushvalue(L, 1);
   lua_setfield(L, -2, "plugin_name");
   const char *name = luaL_checkstring(L, 2);
@@ -245,7 +243,7 @@ static int register_lib(lua_State *L)
     lua_pushinteger(L,1);
     lua_gettable(L,-2);
     dt_ui_container_t container;
-    luaA_to(L,dt_ui_container_t,&container,-1); 
+    luaA_to(L,dt_ui_container_t,&container,-1);
     lua_pop(L,1);
     position_description->container = container;
 
@@ -289,7 +287,7 @@ static int register_lib(lua_State *L)
 
 
 
- 
+
   if(lib->gui_reset)
   {
     dt_accel_register_lib(lib, NC_("accel", "reset lib parameters"), 0, 0);

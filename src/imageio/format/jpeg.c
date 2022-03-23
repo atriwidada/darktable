@@ -1,7 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2010 johannes hanika.
-    copyright (c) 2011 henrik andersson.
+    Copyright (C) 2010-2021 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -103,19 +102,18 @@ static void dt_imageio_jpeg_error_exit(j_common_ptr cinfo)
 
 static void write_icc_profile(j_compress_ptr cinfo, const JOCTET *icc_data_ptr, unsigned int icc_data_len)
 {
-  unsigned int num_markers; /* total number of markers we'll write */
   int cur_marker = 1;       /* per spec, counting starts at 1 */
-  unsigned int length;      /* number of bytes to write in this marker */
 
   /* Calculate the number of markers we'll need, rounding up of course */
-  num_markers = icc_data_len / MAX_DATA_BYTES_IN_MARKER;
+  unsigned int num_markers = icc_data_len / MAX_DATA_BYTES_IN_MARKER;
   if(num_markers * MAX_DATA_BYTES_IN_MARKER != icc_data_len) num_markers++;
 
   while(icc_data_len > 0)
   {
     /* length of profile to put in this marker */
-    length = icc_data_len;
-    if(length > MAX_DATA_BYTES_IN_MARKER) length = MAX_DATA_BYTES_IN_MARKER;
+    unsigned int length = icc_data_len;
+    if(length > MAX_DATA_BYTES_IN_MARKER)
+      length = MAX_DATA_BYTES_IN_MARKER;
     icc_data_len -= length;
 
     /* Write the JPEG marker header (APP2 code and marker length) */
@@ -216,11 +214,7 @@ read_icc_profile (j_decompress_ptr cinfo,
                   JOCTET **icc_data_ptr,
                   unsigned int *icc_data_len)
 {
-  jpeg_saved_marker_ptr marker;
   int num_markers = 0;
-  int seq_no;
-  JOCTET *icc_data;
-  unsigned int total_length;
 #define MAX_SEQ_NO 255 /* sufficient since marker numbers are bytes */
   char marker_present[MAX_SEQ_NO+1];    /* 1 if marker found */
   unsigned int data_length[MAX_SEQ_NO+1]; /* size of profile data in marker */
@@ -233,63 +227,60 @@ read_icc_profile (j_decompress_ptr cinfo,
    * any ICC markers and verifies the consistency of the marker numbering.
    */
 
-  for (seq_no = 1; seq_no <= MAX_SEQ_NO; seq_no++)
+  for(int seq_no = 1; seq_no <= MAX_SEQ_NO; seq_no++)
     marker_present[seq_no] = 0;
 
-  for (marker = cinfo->marker_list; marker != NULL; marker = marker->next)
+  for(jpeg_saved_marker_ptr marker = cinfo->marker_list; marker != NULL; marker = marker->next)
   {
-    if (marker_is_icc(marker))
+    if(marker_is_icc(marker))
     {
-      if (num_markers == 0)
+      if(num_markers == 0)
         num_markers = GETJOCTET(marker->data[13]);
-      else if (num_markers != GETJOCTET(marker->data[13]))
+      else if(num_markers != GETJOCTET(marker->data[13]))
         return FALSE;   /* inconsistent num_markers fields */
-      seq_no = GETJOCTET(marker->data[12]);
-      if (seq_no <= 0 || seq_no > num_markers)
+      const int seq_no = GETJOCTET(marker->data[12]);
+      if(seq_no <= 0 || seq_no > num_markers)
         return FALSE;   /* bogus sequence number */
-      if (marker_present[seq_no])
+      if(marker_present[seq_no])
         return FALSE;   /* duplicate sequence numbers */
       marker_present[seq_no] = 1;
       data_length[seq_no] = marker->data_length - ICC_OVERHEAD_LEN;
     }
   }
 
-  if (num_markers == 0)
+  if(num_markers == 0)
     return FALSE;
 
   /* Check for missing markers, count total space needed,
    * compute offset of each marker's part of the data.
    */
 
-  total_length = 0;
-  for (seq_no = 1; seq_no <= num_markers; seq_no++)
+  unsigned int total_length = 0;
+  for(int seq_no = 1; seq_no <= num_markers; seq_no++)
   {
-    if (marker_present[seq_no] == 0)
+    if(marker_present[seq_no] == 0)
       return FALSE;   /* missing sequence number */
     data_offset[seq_no] = total_length;
     total_length += data_length[seq_no];
   }
 
-  if (total_length <= 0)
+  if(total_length <= 0)
     return FALSE;   /* found only empty markers? */
 
   /* Allocate space for assembled data */
-  icc_data = (JOCTET *) calloc(total_length, sizeof(JOCTET));
-  if (icc_data == NULL)
+  JOCTET *icc_data = (JOCTET *)calloc(total_length, sizeof(JOCTET));
+  if(icc_data == NULL)
     return FALSE;   /* oops, out of memory */
 
   /* and fill it in */
-  for (marker = cinfo->marker_list; marker != NULL; marker = marker->next)
+  for(jpeg_saved_marker_ptr marker = cinfo->marker_list; marker != NULL; marker = marker->next)
   {
-    if (marker_is_icc(marker))
+    if(marker_is_icc(marker))
     {
-      JOCTET FAR *src_ptr;
-      JOCTET *dst_ptr;
-      unsigned int length;
-      seq_no = GETJOCTET(marker->data[12]);
-      dst_ptr = icc_data + data_offset[seq_no];
-      src_ptr = marker->data + ICC_OVERHEAD_LEN;
-      length = data_length[seq_no];
+      const int seq_no = GETJOCTET(marker->data[12]);
+      JOCTET *dst_ptr = icc_data + data_offset[seq_no];
+      JOCTET FAR *src_ptr = marker->data + ICC_OVERHEAD_LEN;
+      unsigned int length = data_length[seq_no];
       while (length--)
       {
         *dst_ptr++ = *src_ptr++;
@@ -312,7 +303,8 @@ read_icc_profile (j_decompress_ptr cinfo,
 
 int write_image(dt_imageio_module_data_t *jpg_tmp, const char *filename, const void *in_tmp,
                 dt_colorspaces_color_profile_type_t over_type, const char *over_filename,
-                void *exif, int exif_len, int imgid, int num, int total, struct dt_dev_pixelpipe_t *pipe)
+                void *exif, int exif_len, int imgid, int num, int total, struct dt_dev_pixelpipe_t *pipe,
+                const gboolean export_masks)
 {
   dt_imageio_jpeg_t *jpg = (dt_imageio_jpeg_t *)jpg_tmp;
   const uint8_t *in = (const uint8_t *)in_tmp;
@@ -345,23 +337,10 @@ int write_image(dt_imageio_module_data_t *jpg_tmp, const char *filename, const v
   if(jpg->quality < 40) jpg->cinfo.smoothing_factor = 60;
   jpg->cinfo.optimize_coding = 1;
 
-  // according to specs density_unit = 0, X_density = 1, Y_density = 1 should be fine and valid since it
-  // describes an image with unknown unit and square pixels.
-  // however, some applications (like the Telekom cloud thingy) seem to be confused by that, so let's set
-  // these calues to the same as stored in exiv :/
   const int resolution = dt_conf_get_int("metadata/resolution");
-  if(resolution > 0)
-  {
-    jpg->cinfo.density_unit = 1;
-    jpg->cinfo.X_density = resolution;
-    jpg->cinfo.Y_density = resolution;
-  }
-  else
-  {
-    jpg->cinfo.density_unit = 0;
-    jpg->cinfo.X_density = 1;
-    jpg->cinfo.Y_density = 1;
-  }
+  jpg->cinfo.density_unit = 1;
+  jpg->cinfo.X_density = resolution;
+  jpg->cinfo.Y_density = resolution;
 
   jpeg_start_compress(&(jpg->cinfo), TRUE);
 
@@ -372,14 +351,14 @@ int write_image(dt_imageio_module_data_t *jpg_tmp, const char *filename, const v
     cmsSaveProfileToMem(out_profile, 0, &len);
     if(len > 0)
     {
-      unsigned char *buf = malloc(len * sizeof(unsigned char));
+      unsigned char *buf = malloc(sizeof(unsigned char) * len);
       cmsSaveProfileToMem(out_profile, buf, &len);
       write_icc_profile(&(jpg->cinfo), buf, len);
       free(buf);
     }
   }
 
-  uint8_t *row = dt_alloc_align(64, (size_t)3 * jpg->global.width * sizeof(uint8_t));
+  uint8_t *row = dt_alloc_align(64, sizeof(uint8_t) * 3 * jpg->global.width);
   const uint8_t *buf;
   while(jpg->cinfo.next_scanline < jpg->cinfo.image_height)
   {
@@ -590,9 +569,15 @@ void gui_init(dt_imageio_module_format_t *self)
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   self->widget = box;
   // quality slider
-  g->quality = dt_bauhaus_slider_new_with_range(NULL, 5, 100, 1, 95, 0);
-  dt_bauhaus_widget_set_label(g->quality, NULL, _("quality"));
-  dt_bauhaus_slider_set_default(g->quality, 95);
+  g->quality = dt_bauhaus_slider_new_with_range(NULL,
+                                                dt_confgen_get_int("plugins/imageio/format/jpeg/quality", DT_MIN),
+                                                dt_confgen_get_int("plugins/imageio/format/jpeg/quality", DT_MAX),
+                                                1,
+                                                dt_confgen_get_int("plugins/imageio/format/jpeg/quality", DT_DEFAULT),
+                                                0);
+  dt_bauhaus_widget_set_label(g->quality, NULL, N_("quality"));
+  dt_bauhaus_slider_set_default(g->quality, dt_confgen_get_int("plugins/imageio/format/jpeg/quality", DT_DEFAULT));
+  dt_bauhaus_slider_set(g->quality, dt_conf_get_int("plugins/imageio/format/jpeg/quality"));
   gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(g->quality), TRUE, TRUE, 0);
   g_signal_connect(G_OBJECT(g->quality), "value-changed", G_CALLBACK(quality_changed), NULL);
   // TODO: add more options: subsample dreggn
@@ -606,7 +591,7 @@ void gui_cleanup(dt_imageio_module_format_t *self)
 void gui_reset(dt_imageio_module_format_t *self)
 {
   dt_imageio_jpeg_gui_data_t *g = (dt_imageio_jpeg_gui_data_t *)self->gui_data;
-  dt_bauhaus_slider_set(g->quality, dt_conf_get_int("plugins/imageio/format/jpeg/quality"));
+  dt_bauhaus_slider_set(g->quality, dt_confgen_get_int("plugins/imageio/format/jpeg/quality", DT_DEFAULT));
 }
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh

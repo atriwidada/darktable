@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2013 tobias ellinghaus.
+    Copyright (C) 2013-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -186,22 +186,20 @@ static float parse_expression(parser_state_t *self)
 
 static float parse_additive_expression(parser_state_t *self)
 {
-  float left, right;
-
   if(!self->token) return NAN;
 
-  left = parse_multiplicative_expression(self);
+  float left = parse_multiplicative_expression(self);
 
   while(self->token && self->token->type == T_OPERATOR)
   {
-    operators_t operator= self->token->data.operator;
+    const operators_t operator= self->token->data.operator;
 
     if(operator!= O_PLUS &&operator!= O_MINUS) return left;
 
     free(self->token);
     self->token = get_token(self);
 
-    right = parse_multiplicative_expression(self);
+    const float right = parse_multiplicative_expression(self);
 
     if(operator== O_PLUS)
       left += right;
@@ -214,22 +212,20 @@ static float parse_additive_expression(parser_state_t *self)
 
 static float parse_multiplicative_expression(parser_state_t *self)
 {
-  float left, right;
-
   if(!self->token) return NAN;
 
-  left = parse_power_expression(self);
+  float left = parse_power_expression(self);
 
   while(self->token && self->token->type == T_OPERATOR)
   {
-    operators_t operator= self->token->data.operator;
+    const operators_t operator= self->token->data.operator;
 
     if(operator!= O_MULTIPLY &&operator!= O_DIVISION &&operator!= O_MODULO) return left;
 
     free(self->token);
     self->token = get_token(self);
 
-    right = parse_power_expression(self);
+    float right = parse_power_expression(self);
 
     if(operator== O_MULTIPLY)
       left *= right;
@@ -244,11 +240,9 @@ static float parse_multiplicative_expression(parser_state_t *self)
 
 static float parse_power_expression(parser_state_t *self)
 {
-  float left, right;
-
   if(!self->token) return NAN;
 
-  left = parse_unary_expression(self);
+  float left = parse_unary_expression(self);
 
   while(self->token && self->token->type == T_OPERATOR)
   {
@@ -257,7 +251,7 @@ static float parse_power_expression(parser_state_t *self)
     free(self->token);
     self->token = get_token(self);
 
-    right = parse_unary_expression(self);
+    const float right = parse_unary_expression(self);
 
     left = powf(left, right);
   }
@@ -296,17 +290,16 @@ static float parse_primary_expression(parser_state_t *self)
 
   if(self->token->type == T_NUMBER)
   {
-    float result = self->token->data.number;
+    const float result = self->token->data.number;
     free(self->token);
     self->token = get_token(self);
     return result;
   }
   if(self->token->type == T_OPERATOR && self->token->data.operator== O_LEFTROUND)
   {
-    float result;
     free(self->token);
     self->token = get_token(self);
-    result = parse_expression(self);
+    const float result = parse_expression(self);
     if(!self->token || self->token->type != T_OPERATOR || self->token->data.operator!= O_RIGHTROUND)
       return NAN;
     free(self->token);
@@ -319,11 +312,10 @@ static float parse_primary_expression(parser_state_t *self)
 
 /** the public interface **/
 
-float dt_calculator_solve(float x, const char *formula)
+float dt_calculator_solve(const float x, const char *formula)
 {
   if(formula == NULL || *formula == '\0') return NAN;
 
-  float result;
   gchar *dotformula = g_strdup(formula);
   parser_state_t *self = (parser_state_t *)malloc(sizeof(parser_state_t));
 
@@ -331,6 +323,8 @@ float dt_calculator_solve(float x, const char *formula)
   self->x = x;
 
   self->token = get_token(self);
+
+  float result = .0f;
 
   //   operators_t operator = -1;
   if(self->token && self->token->type == T_OPERATOR)

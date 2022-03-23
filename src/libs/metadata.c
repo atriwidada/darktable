@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2010-2011 tobias ellinghaus, Henrik Andersson.
+    Copyright (C) 2010-2021 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -28,27 +28,31 @@
 #include "gui/gtk.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
-
+#ifdef GDK_WINDOWING_QUARTZ
+#include "osx/osx.h"
+#endif
 #include <gdk/gdkkeysyms.h>
 
-DT_MODULE(1)
+DT_MODULE(3)
+
+typedef enum dt_metadata_pref_cols_t
+{
+  DT_METADATA_PREF_COL_INDEX = 0, // display index
+  DT_METADATA_PREF_COL_NAME,      // displayed name
+  DT_METADATA_PREF_COL_VISIBLE,   // visibility
+  DT_METADATA_PREF_COL_PRIVATE,    // do not export
+  DT_METADATA_PREF_NUM_COLS
+} dt_metadata_pref_cols_t;
 
 typedef struct dt_lib_metadata_t
 {
-  int imgsel;
-  GtkComboBox *title;
-  GtkComboBox *description;
-  GtkComboBox *creator;
-  GtkComboBox *publisher;
-  GtkComboBox *rights;
-  gboolean multi_title;
-  gboolean multi_description;
-  gboolean multi_creator;
-  gboolean multi_publisher;
-  gboolean multi_rights;
+  GtkTextView *textview[DT_METADATA_NUMBER];
+  GtkWidget *swindow[DT_METADATA_NUMBER];
+  GList *metadata_list[DT_METADATA_NUMBER];
+  char *setting_name[DT_METADATA_NUMBER];
   gboolean editing;
-  GtkWidget *clear_button;
   GtkWidget *apply_button;
+  GList *last_act_on;
 } dt_lib_metadata_t;
 
 const char *name(dt_lib_module_t *self)
@@ -67,142 +71,169 @@ uint32_t container(dt_lib_module_t *self)
   return DT_UI_CONTAINER_PANEL_RIGHT_CENTER;
 }
 
-static void fill_combo_box_entry(GtkComboBox *box, uint32_t count, GList *items, gboolean *multi)
+void _textbuffer_changed(GtkTextBuffer *textbuffer, dt_lib_module_t *self);
+
+static gboolean _is_leave_unchanged(GtkTextView *textview)
 {
-  gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(box));
-
-  if(count == 0)
-  {
-    gtk_entry_set_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(box))), "");
-    *multi = FALSE;
-    return;
-  }
-
-  if(count == 1)
-  {
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(box),
-                                   _("<leave unchanged>")); // FIXME: should be italic!
-    gtk_combo_box_set_button_sensitivity(GTK_COMBO_BOX(box), GTK_SENSITIVITY_AUTO);
-    *multi = TRUE;
-  }
-  else
-  {
-    gtk_combo_box_set_button_sensitivity(GTK_COMBO_BOX(box), GTK_SENSITIVITY_OFF);
-    *multi = FALSE;
-  }
-  for(GList *iter = items; iter; iter = g_list_next(iter))
-  {
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(box), iter->data); // FIXME: dt segfaults when there
-                                                                         // are illegal characters in the
-                                                                         // string.
-  }
-  gtk_combo_box_set_active(GTK_COMBO_BOX(box), 0);
+  return GPOINTER_TO_INT(g_object_get_data(G_OBJECT(textview), "tv_multiple"));
 }
 
-static void update(dt_lib_module_t *user_data, gboolean early_bark_out)
+static gchar *_get_buffer_text(GtkTextView *textview)
 {
-  //   early_bark_out = FALSE; // FIXME: when barking out early we don't update on ctrl-a/ctrl-shift-a. but
-  //   otherwise it's impossible to edit text
-  const dt_lib_module_t *self = (dt_lib_module_t *)user_data;
+  GtkTextBuffer *buffer = gtk_text_view_get_buffer(textview);
+  GtkTextIter start, end;
+  gtk_text_buffer_get_bounds(buffer, &start, &end);
+  return gtk_text_buffer_get_text(buffer, &start, &end, TRUE);
+}
+
+static void _text_set_all_selected(GtkTextView *textview, const gboolean selected)
+{
+  GtkTextBuffer *buffer = gtk_text_view_get_buffer(textview);
+  GtkTextIter start, end;
+  gtk_text_buffer_get_bounds(buffer, &start, &end);
+  gtk_text_buffer_select_range(buffer, selected ? &start : &end, &end);
+}
+
+static void _text_set_italic(GtkTextView *textview, const gboolean italic)
+{
+  GtkTextBuffer *buffer = gtk_text_view_get_buffer(textview);
+  GtkTextIter start, end;
+  gtk_text_buffer_get_bounds(buffer, &start, &end);
+  if(italic)
+    gtk_text_buffer_apply_tag_by_name(buffer, "italic", &start, &end);
+  else
+    gtk_text_buffer_remove_tag_by_name(buffer, "italic", &start, &end);
+}
+
+static void _set_text_buffer(GtkTextBuffer *buffer, const char *text)
+{
+  g_signal_handlers_block_matched(buffer, G_SIGNAL_MATCH_FUNC, 0, 0, NULL, _textbuffer_changed, NULL);
+  gtk_text_buffer_set_text(buffer, text, -1);
+  g_signal_handlers_unblock_matched(buffer, G_SIGNAL_MATCH_FUNC, 0, 0, NULL, _textbuffer_changed, NULL);
+}
+
+static void _fill_text_view(const uint32_t i, const uint32_t count, dt_lib_module_t *self)
+{
   dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
-  const int imgsel = dt_control_get_mouse_over_id();
-  if(early_bark_out && imgsel == d->imgsel) return;
+  gboolean multi = FALSE;
 
-  d->imgsel = imgsel;
+  GtkTextBuffer *buffer = gtk_text_view_get_buffer(d->textview[i]);
+  if(count == 0)  // no metadata value
+  {
+    _set_text_buffer(buffer, "");
+  }
+  else if(count == 1) // images with different metadata values
+  {
+    _set_text_buffer(buffer, _("<leave unchanged>"));
+    multi = TRUE;
+  }
+  else // one or several images with the same metadata value
+  {
+    _set_text_buffer(buffer, (char *)d->metadata_list[i]->data);
+  }
+  g_object_set_data(G_OBJECT(d->textview[i]), "tv_multiple", GINT_TO_POINTER(multi));
+  _text_set_italic(d->textview[i], multi);
+}
 
-  sqlite3_stmt *stmt;
+static void _update(dt_lib_module_t *self)
+{
+  dt_lib_cancel_postponed_update(self);
+  dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
 
-  GList *title = NULL;
-  uint32_t title_count = 0;
-  GList *description = NULL;
-  uint32_t description_count = 0;
-  GList *creator = NULL;
-  uint32_t creator_count = 0;
-  GList *publisher = NULL;
-  uint32_t publisher_count = 0;
-  GList *rights = NULL;
-  uint32_t rights_count = 0;
-  uint32_t imgs_count = 0;
+  GList *imgs = dt_act_on_get_images(FALSE, FALSE, FALSE);
+
+  // first we want to make sure the list of images to act on has changed
+  // this is not the case if mouse hover change but still stay in selection for ex.
+  if(!imgs && !d->last_act_on) return;
+  if(imgs && d->last_act_on)
+  {
+    gboolean changed = FALSE;
+    GList *l = d->last_act_on;
+    GList *ll = (GList *)imgs;
+    while(l && ll)
+    {
+      if(GPOINTER_TO_INT(l->data) != GPOINTER_TO_INT(ll->data))
+      {
+        changed = TRUE;
+        break;
+      }
+      l = g_list_next(l);
+      ll = g_list_next(ll);
+    }
+    if(!changed)
+    {
+      g_list_free(imgs);
+      return;
+    }
+  }
+  g_list_free(d->last_act_on);
+  d->last_act_on = imgs;
+
+  GList *metadata[DT_METADATA_NUMBER];
+  uint32_t metadata_count[DT_METADATA_NUMBER];
+
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+  {
+    metadata[i] = NULL;
+    metadata_count[i] = 0;
+  }
 
   // using dt_metadata_get() is not possible here. we want to do all this in a single pass, everything else
   // takes ages.
-  if(imgsel < 0) // selected images
+  gchar *images = dt_act_on_get_query(FALSE);
+  const uint32_t imgs_count = g_list_length((GList *)imgs);
+
+  if(images)
   {
-    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "SELECT COUNT(*) FROM main.selected_images", -1, &stmt, NULL);
-    if(sqlite3_step(stmt) == SQLITE_ROW) imgs_count = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "SELECT key, value, COUNT(id) AS ct FROM main.meta_data WHERE id IN "
-                                                               "(SELECT imgid FROM main.selected_images) GROUP BY "
-                                                               "key, value ORDER BY value",
-                                -1, &stmt, NULL);
-  }
-  else // single image under mouse cursor
-  {
-    imgs_count = 1;
-    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "SELECT key, value, COUNT(id) AS ct FROM main.meta_data "
-                                                               "WHERE id = ?1 GROUP BY key, value ORDER BY value",
-                                -1, &stmt, NULL);
-    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgsel);
-  }
-  while(sqlite3_step(stmt) == SQLITE_ROW)
-  {
-    if(sqlite3_column_bytes(stmt, 1))
+    sqlite3_stmt *stmt;
+    gchar *query = g_strdup_printf(
+                            "SELECT key, value, COUNT(id) AS ct FROM main.meta_data"
+                            " WHERE id IN (%s)"
+                            " GROUP BY key, value ORDER BY value",
+                            images);
+    g_free(images);
+    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
+
+    while(sqlite3_step(stmt) == SQLITE_ROW)
     {
-      char *value = g_strdup((char *)sqlite3_column_text(stmt, 1));
-      uint32_t count = sqlite3_column_int(stmt, 2);
-      switch(sqlite3_column_int(stmt, 0))
+      if(sqlite3_column_bytes(stmt, 1))
       {
-        case DT_METADATA_XMP_DC_CREATOR:
-          creator_count = (count == imgs_count) ? 2 : 1;
-          creator = g_list_append(creator, value);
-          break;
-        case DT_METADATA_XMP_DC_PUBLISHER:
-          publisher_count = (count == imgs_count) ? 2 : 1;
-          publisher = g_list_append(publisher, value);
-          break;
-        case DT_METADATA_XMP_DC_TITLE:
-          title_count = (count == imgs_count) ? 2 : 1;
-          title = g_list_append(title, value);
-          break;
-        case DT_METADATA_XMP_DC_DESCRIPTION:
-          description_count = (count == imgs_count) ? 2 : 1;
-          description = g_list_append(description, value);
-          break;
-        case DT_METADATA_XMP_DC_RIGHTS:
-          rights_count = (count == imgs_count) ? 2 : 1;
-          rights = g_list_append(rights, value);
-          break;
+        const uint32_t key = (uint32_t)sqlite3_column_int(stmt, 0);
+        if(key >= DT_METADATA_NUMBER)
+          continue;
+        char *value = g_strdup((char *)sqlite3_column_text(stmt, 1));
+        const uint32_t count = (uint32_t)sqlite3_column_int(stmt, 2);
+        metadata_count[key] = (count == imgs_count) ? 2 : 1;  // if = all images have the same metadata
+        metadata[key] = g_list_append(metadata[key], value);
       }
     }
+    sqlite3_finalize(stmt);
+    g_free(query);
   }
-  sqlite3_finalize(stmt);
 
-  fill_combo_box_entry(d->title, title_count, title, &(d->multi_title));
-  fill_combo_box_entry(d->description, description_count, description, &(d->multi_description));
-  fill_combo_box_entry(d->rights, rights_count, rights, &(d->multi_rights));
-  fill_combo_box_entry(d->creator, creator_count, creator, &(d->multi_creator));
-  fill_combo_box_entry(d->publisher, publisher_count, publisher, &(d->multi_publisher));
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+  {
+    const uint32_t keyid = dt_metadata_get_keyid_by_display_order(i);
+    if(dt_metadata_get_type(keyid) == DT_METADATA_TYPE_INTERNAL)
+      continue;
+    g_list_free_full(d->metadata_list[i], g_free);
+    d->metadata_list[i] = metadata[keyid];
+    _fill_text_view(i, metadata_count[keyid], self);
+  }
 
-  g_list_free_full(title, g_free);
-  g_list_free_full(description, g_free);
-  g_list_free_full(creator, g_free);
-  g_list_free_full(publisher, g_free);
-  g_list_free_full(rights, g_free);
+  gtk_widget_set_sensitive(GTK_WIDGET(d->apply_button), imgs_count > 0);
 }
 
-
-static gboolean draw(GtkWidget *widget, cairo_t *cr, gpointer user_data)
+static void _image_selection_changed_callback(gpointer instance, dt_lib_module_t *self)
 {
-  if(!dt_control_running()) return FALSE;
-  update((dt_lib_module_t *)user_data, TRUE);
-  return FALSE;
+  _update(self);
 }
 
-static void clear_button_clicked(GtkButton *button, gpointer user_data)
+static void _collection_updated_callback(gpointer instance, dt_collection_change_t query_change,
+                                         dt_collection_properties_t changed_property, gpointer imgs, int next,
+                                         dt_lib_module_t *self)
 {
-  dt_metadata_clear(-1, TRUE, TRUE);
-  dt_image_synch_xmp(-1);
-  update(user_data, FALSE);
+  _update(self);
 }
 
 static void _append_kv(GList **l, const gchar *key, const gchar *value)
@@ -211,84 +242,153 @@ static void _append_kv(GList **l, const gchar *key, const gchar *value)
   *l = g_list_append(*l, (gchar *)value);
 }
 
-static void write_metadata(dt_lib_module_t *self)
+static void _metadata_set_list(const int i, GList **key_value, dt_lib_metadata_t *d)
+{
+  const uint32_t keyid = dt_metadata_get_keyid_by_display_order(i);
+  if(dt_metadata_get_type(i) == DT_METADATA_TYPE_INTERNAL)
+    return;
+  gchar *metadata = _get_buffer_text(GTK_TEXT_VIEW(d->textview[i]));
+  if(metadata && !_is_leave_unchanged(GTK_TEXT_VIEW(d->textview[i])))
+    _append_kv(key_value, dt_metadata_get_key(keyid), metadata);
+}
+
+static void _write_metadata(GtkTextView *textview, dt_lib_module_t *self)
 {
   dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
-
-  int32_t mouse_over_id;
-
-  d->editing = FALSE;
-
-  mouse_over_id = d->imgsel;
-
-  gchar *title = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->title));
-  gchar *description = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->description));
-  gchar *rights = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->rights));
-  gchar *creator = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->creator));
-  gchar *publisher = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->publisher));
 
   GList *key_value = NULL;
+  if(textview)
+  {
+    const int i = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(textview), "tv_index"));
+    _metadata_set_list(i, &key_value, d);
+  }
+  else
+  {
+    for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+      _metadata_set_list(i, &key_value, d);
+  }
 
-  if(title != NULL && (d->multi_title == FALSE || gtk_combo_box_get_active(GTK_COMBO_BOX(d->title)) != 0))
-    _append_kv(&key_value, "Xmp.dc.title", title);
-  if(description != NULL
-     && (d->multi_description == FALSE || gtk_combo_box_get_active(GTK_COMBO_BOX(d->description)) != 0))
-    _append_kv(&key_value, "Xmp.dc.description", description);
-  if(rights != NULL && (d->multi_rights == FALSE || gtk_combo_box_get_active(GTK_COMBO_BOX(d->rights)) != 0))
-    _append_kv(&key_value, "Xmp.dc.rights", rights);
-  if(creator != NULL
-     && (d->multi_creator == FALSE || gtk_combo_box_get_active(GTK_COMBO_BOX(d->creator)) != 0))
-    _append_kv(&key_value, "Xmp.dc.creator", creator);
-  if(publisher != NULL
-     && (d->multi_publisher == FALSE || gtk_combo_box_get_active(GTK_COMBO_BOX(d->publisher)) != 0))
-    _append_kv(&key_value, "Xmp.dc.publisher", publisher);
+  GList *imgs = dt_act_on_get_images(FALSE, TRUE, FALSE);
+  dt_metadata_set_list(imgs, key_value, TRUE);
 
-  dt_metadata_set_list(mouse_over_id, key_value, TRUE, TRUE);
-
+  for(GList *l = key_value; l; l = l->next)
+  {
+    l = l->next;
+    g_free(l->data);  // metadata value
+  }
   g_list_free(key_value);
-  g_free(title);
-  g_free(description);
-  g_free(rights);
-  g_free(creator);
-  g_free(publisher);
 
-  dt_image_synch_xmp(mouse_over_id);
-  update(self, FALSE);
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_MOUSE_OVER_IMAGE_CHANGE);
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_METADATA_CHANGED, DT_METADATA_SIGNAL_NEW_VALUE);
+
+  dt_image_synch_xmps(imgs);
+  g_list_free(imgs);
+  _update(self);
 }
 
-static void apply_button_clicked(GtkButton *button, gpointer user_data)
+static void _apply_button_clicked(GtkButton *button, dt_lib_module_t *self)
 {
-  write_metadata(user_data);
+  dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
+  d->editing = FALSE;
+  _write_metadata(NULL, self);
 }
 
-static gboolean key_pressed(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
+static gboolean _key_pressed(GtkWidget *textview, GdkEventKey *event, dt_lib_module_t *self)
 {
-  const dt_lib_module_t *self = (dt_lib_module_t *)user_data;
   dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
 
-  switch(event->keyval)
+  if(dt_modifier_is(event->state, GDK_CONTROL_MASK))
   {
-    case GDK_KEY_Return:
-    case GDK_KEY_KP_Enter:
-      write_metadata(user_data);
-      gtk_window_set_focus(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)), NULL);
-      break;
-    case GDK_KEY_Escape:
-      update(user_data, FALSE);
-      gtk_window_set_focus(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)), NULL);
-      break;
-    case GDK_KEY_Tab:
-      write_metadata(user_data);
-      break;
-    default:
-      d->editing = TRUE;
+    switch(event->keyval)
+    {
+      case GDK_KEY_Return:
+      case GDK_KEY_KP_Enter:
+        // insert new line
+        event->state &= ~GDK_CONTROL_MASK;  //TODO: on Mac, remap Ctrl to Cmd key
+        d->editing = TRUE;
+        break;
+      default:
+        break;
+    }
   }
-  return FALSE;
+  else
+  {
+    switch(event->keyval)
+    {
+      case GDK_KEY_Return:
+      case GDK_KEY_KP_Enter:
+        _write_metadata(GTK_TEXT_VIEW(textview), self);
+        _text_set_all_selected(GTK_TEXT_VIEW(textview), FALSE);
+        d->editing = FALSE;
+        return TRUE;
+        break;
+      case GDK_KEY_Tab:
+      case GDK_KEY_KP_Tab:
+      case GDK_KEY_ISO_Left_Tab:
+        _write_metadata(GTK_TEXT_VIEW(textview), self);
+        d->editing = FALSE;
+        break;
+      case GDK_KEY_Escape:
+      {
+        if(dt_modifier_is(event->state, 0))
+        {
+          _update(self);
+          gtk_window_set_focus(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)), NULL);
+          d->editing = FALSE;
+          return TRUE;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return gtk_text_view_im_context_filter_keypress(GTK_TEXT_VIEW(textview), event);
 }
 
-void gui_reset(dt_lib_module_t *self)
+void _textbuffer_changed(GtkTextBuffer *textbuffer, dt_lib_module_t *self)
 {
-  update(self, FALSE);
+  dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
+  d->editing = TRUE;
+  GtkTextView *textview = GINT_TO_POINTER(g_object_get_data(G_OBJECT(textbuffer), "buffer_tv"));
+  g_object_set_data(G_OBJECT(textview), "tv_multiple", GINT_TO_POINTER(FALSE));
+}
+
+gboolean _textview_focus(GtkWidget *widget, GtkDirectionType d, gpointer user_data)
+{
+  GtkWidget *target = g_object_get_data(G_OBJECT(widget), d == GTK_DIR_TAB_FORWARD ? "meta_next" : "meta_prev");
+  gtk_widget_grab_focus(target);
+  return TRUE;
+}
+
+static gboolean _got_focus(GtkWidget *textview, dt_lib_module_t *self)
+{
+  dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
+  if(!d->editing)
+  {
+    if(_is_leave_unchanged(GTK_TEXT_VIEW(textview)))
+    {
+      GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(textview));
+      _set_text_buffer(buffer, "");
+      _text_set_italic(GTK_TEXT_VIEW(textview), FALSE);
+    }
+    _text_set_all_selected(GTK_TEXT_VIEW(textview), TRUE);
+  }
+  return TRUE;
+}
+
+static gboolean _lost_focus(GtkWidget *textview, GdkEventFocus *event, dt_lib_module_t *self)
+{
+  dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
+  d->editing = FALSE;
+  if(_is_leave_unchanged(GTK_TEXT_VIEW(textview)))
+  {
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(textview));
+    _set_text_buffer(buffer, _("<leave unchanged>"));
+    _text_set_italic(GTK_TEXT_VIEW(textview), TRUE);
+  }
+  return FALSE;
 }
 
 int position()
@@ -296,23 +396,244 @@ int position()
   return 510;
 }
 
-static void _mouse_over_image_callback(gpointer instace, gpointer user_data)
+static void _update_layout(dt_lib_module_t *self)
 {
-  const dt_lib_module_t *self = (dt_lib_module_t *)user_data;
-  const dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
+  dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
 
-  /* lets trigger an expose for a redraw of widget */
-  if(d->editing)
+  GtkWidget *first = NULL, *previous = NULL;
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
   {
-    write_metadata(user_data);
-    gtk_window_set_focus(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)), NULL);
+    if(dt_metadata_get_type_by_display_order(i) == DT_METADATA_TYPE_INTERNAL)
+      continue;
+    const gchar *name = dt_metadata_get_name_by_display_order(i);
+    const int type = dt_metadata_get_type_by_display_order(i);
+    gchar *setting = g_strdup_printf("plugins/lighttable/metadata/%s_flag", name);
+    const gboolean hidden = type == DT_METADATA_TYPE_INTERNAL ||
+                            dt_conf_get_int(setting) & DT_METADATA_FLAG_HIDDEN;
+    g_free(setting);
+
+    GtkWidget *label = gtk_grid_get_child_at(GTK_GRID(self->widget), 0, i);
+    gtk_widget_set_visible(label, !hidden);
+    GtkWidget *current = GTK_WIDGET(d->textview[i]);
+    gtk_widget_set_visible(gtk_widget_get_parent(current), !hidden);
+
+    if(!hidden)
+    {
+      if(!first) first = previous = current;
+
+      g_object_set_data(G_OBJECT(previous), "meta_next", current);
+      g_object_set_data(G_OBJECT(current), "meta_prev", previous);
+
+      g_object_set_data(G_OBJECT(current), "meta_next", first);
+      g_object_set_data(G_OBJECT(first), "meta_prev", current);
+
+      previous = current;
+    }
   }
-  update(user_data, FALSE);
+}
+
+void gui_reset(dt_lib_module_t *self)
+{
+  dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
+  d->editing = FALSE;
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+  {
+    const gchar *name = dt_metadata_get_name_by_display_order(i);
+    gchar *setting = g_strdup_printf("plugins/lighttable/metadata/%s_flag", name);
+    const gboolean hidden = dt_conf_get_int(setting) & DT_METADATA_FLAG_HIDDEN;
+    g_free(setting);
+    const int type = dt_metadata_get_type_by_display_order(i);
+    // we don't want to lose hidden information
+    if(!hidden && type != DT_METADATA_TYPE_INTERNAL)
+    {
+      GtkTextBuffer *buffer = gtk_text_view_get_buffer(d->textview[i]);
+      _set_text_buffer(buffer, "");
+      _text_set_italic(d->textview[i], FALSE);
+    }
+  }
+  _write_metadata(NULL, self);
+}
+
+static void _mouse_over_image_callback(gpointer instance, dt_lib_module_t *self)
+{
+  dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
+  // if editing don't lose the current entry
+  if (d->editing) return;
+
+  dt_lib_queue_postponed_update(self, _update);
+}
+
+static void _toggled_callback(gchar *path_str, gpointer user_data, const int column)
+{
+  GtkListStore *store = (GtkListStore *)user_data;
+  GtkTreeIter iter;
+  GtkTreePath *path = gtk_tree_path_new_from_string(path_str);
+  gboolean toggle;
+
+  gtk_tree_model_get_iter(GTK_TREE_MODEL(store), &iter, path);
+  gtk_tree_model_get(GTK_TREE_MODEL(store), &iter, column, &toggle, -1);
+  gtk_list_store_set(store, &iter, column, !toggle, -1);
+
+  gtk_tree_path_free(path);
+}
+
+static void _visible_toggled_callback(GtkCellRendererToggle *cell_renderer, gchar *path_str, gpointer user_data)
+{
+  _toggled_callback(path_str, user_data, DT_METADATA_PREF_COL_VISIBLE);
+}
+
+static void _private_toggled_callback(GtkCellRendererToggle *cell_renderer, gchar *path_str, gpointer user_data)
+{
+  _toggled_callback(path_str, user_data, DT_METADATA_PREF_COL_PRIVATE);
+}
+
+void _menuitem_preferences(GtkMenuItem *menuitem, dt_lib_module_t *self)
+{
+  GtkWidget *win = dt_ui_main_window(darktable.gui->ui);
+  GtkWidget *dialog = gtk_dialog_new_with_buttons(_("metadata settings"), GTK_WINDOW(win),
+                                       GTK_DIALOG_DESTROY_WITH_PARENT, _("default"), GTK_RESPONSE_YES,
+                                       _("cancel"), GTK_RESPONSE_NONE, _("save"), GTK_RESPONSE_ACCEPT, NULL);
+  g_signal_connect(dialog, "key-press-event", G_CALLBACK(dt_handle_dialog_enter), NULL);
+  GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+
+  GtkWidget *w = gtk_scrolled_window_new(NULL, NULL);
+  gtk_widget_set_size_request(w, -1, DT_PIXEL_APPLY_DPI(100));
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(w), GTK_POLICY_NEVER, GTK_POLICY_NEVER);
+  gtk_box_pack_start(GTK_BOX(area), w, TRUE, TRUE, 0);
+
+  GtkListStore *store = gtk_list_store_new(DT_METADATA_PREF_NUM_COLS,
+                                           G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN);
+  GtkTreeModel *model = GTK_TREE_MODEL(store);
+  GtkTreeIter iter;
+
+  char *name[DT_METADATA_NUMBER];
+  gboolean visible[DT_METADATA_NUMBER];
+  gboolean private[DT_METADATA_NUMBER];
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+  {
+    const int type = dt_metadata_get_type_by_display_order(i);
+    if(type != DT_METADATA_TYPE_INTERNAL)
+    {
+      name[i] = (gchar *)dt_metadata_get_name_by_display_order(i);
+      gchar *setting = g_strdup_printf("plugins/lighttable/metadata/%s_flag", name[i]);
+      const uint32_t flag = dt_conf_get_int(setting);
+      g_free(setting);
+      visible[i] = !(flag & DT_METADATA_FLAG_HIDDEN);
+      private[i] = flag & DT_METADATA_FLAG_PRIVATE;
+      gtk_list_store_append(store, &iter);
+      gtk_list_store_set(store, &iter,
+                         DT_METADATA_PREF_COL_INDEX, i,
+                         DT_METADATA_PREF_COL_NAME, _(name[i]),
+                         DT_METADATA_PREF_COL_VISIBLE, visible[i],
+                         DT_METADATA_PREF_COL_PRIVATE, private[i],
+                         -1);
+    }
+  }
+
+  GtkWidget *view = gtk_tree_view_new_with_model(model);
+  g_object_unref(model);
+  GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+  GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(_("metadata"), renderer,
+                                                    "text", DT_METADATA_PREF_COL_NAME, NULL);
+  gtk_tree_view_column_set_expand(column, TRUE);
+  gtk_tree_view_append_column(GTK_TREE_VIEW(view), column);
+  renderer = gtk_cell_renderer_toggle_new();
+  g_signal_connect(renderer, "toggled", G_CALLBACK(_visible_toggled_callback), store);
+  column = gtk_tree_view_column_new_with_attributes(_("visible"), renderer,
+                                                    "active", DT_METADATA_PREF_COL_VISIBLE, NULL);
+  gtk_tree_view_append_column(GTK_TREE_VIEW(view), column);
+  GtkWidget *header = gtk_tree_view_column_get_button(column);
+  gtk_widget_set_tooltip_text(header,
+                _("tick if the corresponding metadata is of interest for you"
+                "\nit will be visible from metadata editor, collection and import module"
+                "\nit will be also exported"));
+  renderer = gtk_cell_renderer_toggle_new();
+  g_signal_connect(renderer, "toggled", G_CALLBACK(_private_toggled_callback), store);
+  column = gtk_tree_view_column_new_with_attributes(_("private"), renderer,
+                                                    "active", DT_METADATA_PREF_COL_PRIVATE, NULL);
+  gtk_tree_view_append_column(GTK_TREE_VIEW(view), column);
+  header = gtk_tree_view_column_get_button(column);
+  gtk_widget_set_tooltip_text(header,
+                _("tick if you want to keep this information private (not exported with images)"));
+
+  gtk_container_add(GTK_CONTAINER(w), view);
+
+#ifdef GDK_WINDOWING_QUARTZ
+  dt_osx_disallow_fullscreen(dialog);
+#endif
+  gtk_widget_show_all(dialog);
+
+  int res = gtk_dialog_run(GTK_DIALOG(dialog));
+  while(res == GTK_RESPONSE_YES)
+  {
+    gtk_tree_model_get_iter_first(model, &iter);
+    for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+    {
+      // mimic dt_metadata_init() without saving at this stage
+      const int type = dt_metadata_get_type_by_display_order(i);
+      if(type != DT_METADATA_TYPE_INTERNAL)
+      {
+        gtk_list_store_set(store, &iter,
+                           DT_METADATA_PREF_COL_VISIBLE, type == DT_METADATA_TYPE_OPTIONAL ? FALSE : TRUE,
+                           DT_METADATA_PREF_COL_PRIVATE, FALSE,
+                           -1);
+        gtk_tree_model_iter_next(model, &iter);
+      }
+    }
+    res = gtk_dialog_run(GTK_DIALOG(dialog));
+  }
+
+  if(res == GTK_RESPONSE_ACCEPT)
+  {
+    gboolean meta_signal = FALSE;
+    gboolean meta_remove = FALSE;
+    gboolean valid = gtk_tree_model_get_iter_first(model, &iter);
+    while(valid)
+    {
+      gboolean new_visible;
+      gboolean new_private;
+      uint32_t i;
+      gtk_tree_model_get(model, &iter,
+                         DT_METADATA_PREF_COL_INDEX, &i,
+                         DT_METADATA_PREF_COL_VISIBLE, &new_visible,
+                         DT_METADATA_PREF_COL_PRIVATE, &new_private,
+                         -1);
+      if(i < DT_METADATA_NUMBER && dt_metadata_get_type(i) != DT_METADATA_TYPE_INTERNAL)
+      {
+        gchar *setting = g_strdup_printf("plugins/lighttable/metadata/%s_flag", name[i]);
+        uint32_t flag = dt_conf_get_int(setting);
+        if(new_visible !=  visible[i])
+        {
+          flag = !new_visible ? flag | DT_METADATA_FLAG_HIDDEN : flag & ~DT_METADATA_FLAG_HIDDEN;
+          meta_signal = TRUE;
+          meta_remove =  !new_visible ? TRUE : meta_remove;
+        }
+        if(new_private != private[i])
+        {
+          flag = new_private ? flag | DT_METADATA_FLAG_PRIVATE : flag & ~DT_METADATA_FLAG_PRIVATE;
+        }
+        dt_conf_set_int(setting, flag);
+        g_free(setting);
+      }
+      valid = gtk_tree_model_iter_next(model, &iter);
+    }
+    if(meta_signal)
+      DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_METADATA_CHANGED,
+                              meta_remove ? DT_METADATA_SIGNAL_HIDDEN : DT_METADATA_SIGNAL_SHOWN);
+  }
+  _update_layout(self);
+  gtk_widget_destroy(dialog);
+}
+
+void set_preferences(void *menu, dt_lib_module_t *self)
+{
+  GtkWidget *mi = gtk_menu_item_new_with_label(_("preferences..."));
+  g_signal_connect(G_OBJECT(mi), "activate", G_CALLBACK(_menuitem_preferences), self);
+  gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
 }
 
 void init_key_accels(dt_lib_module_t *self)
 {
-  dt_accel_register_lib(self, NC_("accel", "clear"), 0, 0);
   dt_accel_register_lib(self, NC_("accel", "apply"), 0, 0);
 }
 
@@ -320,115 +641,173 @@ void connect_key_accels(dt_lib_module_t *self)
 {
   dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
 
-  dt_accel_connect_button_lib(self, "clear", d->clear_button);
   dt_accel_connect_button_lib(self, "apply", d->apply_button);
+}
+
+void _menu_line_activated(GtkMenuItem *menuitem, GtkTextView *textview)
+{
+  GtkTextBuffer *buffer = gtk_text_view_get_buffer(textview);
+  gtk_text_buffer_set_text(buffer, gtk_label_get_text(GTK_LABEL(gtk_bin_get_child(GTK_BIN(menuitem)))), -1);
+}
+
+static void _populate_popup_multi(GtkTextView *textview, GtkWidget *popup, dt_lib_module_t *self)
+{
+  const dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
+
+  // get grid line number
+  const int i = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(textview), "tv_index"));
+
+  if (!d->metadata_list[i] || !_is_leave_unchanged(GTK_TEXT_VIEW(textview))) return;
+
+  gtk_menu_shell_append(GTK_MENU_SHELL(popup),gtk_separator_menu_item_new());
+
+  for(GList *item = d->metadata_list[i]; item; item = g_list_next(item))
+  {
+    GtkWidget *new_line = gtk_menu_item_new_with_label(item->data);
+    g_signal_connect(G_OBJECT(new_line), "activate", G_CALLBACK(_menu_line_activated), textview);
+    gtk_menu_shell_append(GTK_MENU_SHELL(popup), new_line);
+  }
+  gtk_widget_show_all(popup);
+}
+
+static gboolean _metadata_reset(GtkWidget *label, GdkEventButton *event, GtkWidget *widget)
+{
+  if(event->type == GDK_2BUTTON_PRESS)
+  {
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(widget));
+    _set_text_buffer(buffer, "");
+
+    GdkEventKey e = {0};
+    e.type = GDK_KEY_PRESS;
+    e.keyval = GDK_KEY_KP_Enter;
+    e.send_event = TRUE;
+    e.window = gtk_text_view_get_window(GTK_TEXT_VIEW(widget), GTK_TEXT_WINDOW_TEXT);
+    gboolean ret_val;
+    g_signal_emit_by_name(G_OBJECT(widget), "key-press-event", &e, &ret_val);
+  }
+  return FALSE;
 }
 
 void gui_init(dt_lib_module_t *self)
 {
-  GtkGrid *grid;
-  GtkWidget *button;
-  GtkWidget *label;
-  GtkEntryCompletion *completion;
-  int line = 0;
-
   dt_lib_metadata_t *d = (dt_lib_metadata_t *)calloc(1, sizeof(dt_lib_metadata_t));
   self->data = (void *)d;
 
-  d->imgsel = -1;
+  self->timeout_handle = 0;
 
-  self->widget = gtk_grid_new();
-  dt_gui_add_help_link(self->widget, "metadata_editor.html#metadata_editor_usage");
-  gtk_grid_set_row_spacing(GTK_GRID(self->widget), DT_PIXEL_APPLY_DPI(5));
-  gtk_grid_set_column_spacing(GTK_GRID(self->widget), DT_PIXEL_APPLY_DPI(10));
+  GtkGrid *grid = GTK_GRID(gtk_grid_new());
+  self->widget = GTK_WIDGET(grid);
+  gtk_grid_set_row_spacing(grid, DT_PIXEL_APPLY_DPI(5));
 
-  g_signal_connect(self->widget, "draw", G_CALLBACK(draw), self);
+  dt_gui_add_help_link(self->widget, dt_get_help_url("metadata"));
+  gtk_grid_set_row_spacing(grid, DT_PIXEL_APPLY_DPI(5));
+  gtk_grid_set_column_spacing(grid, DT_PIXEL_APPLY_DPI(10));
 
-  struct
+  for(int i = 0; i < DT_METADATA_NUMBER; i++)
   {
-    char *name;
-    GtkComboBox **box;
-  } entries[] = {
-    // clang-format off
-    {N_("title"), &d->title},
-    {N_("description"), &d->description},
-    {N_("creator"), &d->creator},
-    {N_("publisher"), &d->publisher},
-    {N_("rights"), &d->rights}
-    // clang-format on
-  };
+    if(dt_metadata_get_type_by_display_order(i) == DT_METADATA_TYPE_INTERNAL)
+      continue;
+    GtkWidget *label = dt_ui_label_new(_(dt_metadata_get_name_by_display_order(i)));
+    GtkWidget *labelev = gtk_event_box_new();
+    gtk_widget_add_events(labelev, GDK_BUTTON_PRESS_MASK);
+    gtk_container_add(GTK_CONTAINER(labelev), label);
+    gtk_grid_attach(grid, labelev, 0, i, 1, 1);
+    gtk_widget_set_tooltip_text(GTK_WIDGET(label),
+              _("metadata text. ctrl-wheel scroll to resize the text box"
+              "\n ctrl-enter inserts a new line (caution, may not be compatible with standard metadata)."
+              "\nif <leave unchanged> selected images have different metadata."
+              "\nin that case, right-click gives the possibility to choose one of them."
+              "\npress escape to exit the popup window"));
 
-  for(line = 0; line < sizeof(entries) / sizeof(entries[0]); line++)
-  {
-    label = gtk_label_new(_(entries[line].name));
-    g_object_set(G_OBJECT(label), "xalign", 0.0, (gchar *)0);
+    GtkWidget *textview = gtk_text_view_new();
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(textview));
+    g_object_set_data(G_OBJECT(buffer), "buffer_tv", GINT_TO_POINTER(textview));
+    g_object_set_data(G_OBJECT(textview), "tv_index", GINT_TO_POINTER(i));
+    g_object_set_data(G_OBJECT(textview), "tv_multiple", GINT_TO_POINTER(FALSE));
+    gtk_text_buffer_create_tag (gtk_text_view_get_buffer(GTK_TEXT_VIEW(textview)),
+                                "italic", "style", PANGO_STYLE_ITALIC, NULL);
 
-    GtkWidget *combobox = gtk_combo_box_text_new_with_entry();
-    *(entries[line].box) = GTK_COMBO_BOX(combobox);
+    const char *name = (char *)dt_metadata_get_name_by_display_order(i);
+    d->setting_name[i] = g_strdup_printf("plugins/lighttable/metadata/%s_text_height", name);
 
-    gtk_widget_set_hexpand(combobox, TRUE);
+    GtkWidget *swindow = dt_ui_scroll_wrap(GTK_WIDGET(textview), 100, d->setting_name[i]);
 
-    GtkWidget *entry = gtk_bin_get_child(GTK_BIN(combobox));
-    dt_gui_key_accel_block_on_focus_connect(entry);
-    completion = gtk_entry_completion_new();
-    gtk_entry_completion_set_model(completion, gtk_combo_box_get_model(GTK_COMBO_BOX(combobox)));
-    gtk_entry_completion_set_text_column(completion, 0);
-    gtk_entry_completion_set_inline_completion(completion, TRUE);
-    gtk_entry_set_completion(GTK_ENTRY(entry), completion);
-    g_object_unref(completion);
+    gtk_grid_attach(grid, swindow, 1, i, 1, 1);
+    gtk_widget_set_hexpand(swindow, TRUE);
+    d->swindow[i] = swindow;
 
-    g_signal_connect(entry, "key-press-event", G_CALLBACK(key_pressed), self);
+    //workaround for a Gtk issue where the textview does not wrap correctly
+    //while resizing the panel or typing into the widget
+    //reported upstream to https://gitlab.gnome.org/GNOME/gtk/-/issues/4042
+    //see also discussions on https://github.com/darktable-org/darktable/pull/10584
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(swindow), GTK_POLICY_NEVER, GTK_POLICY_ALWAYS);
 
-    gtk_entry_set_width_chars(GTK_ENTRY(entry), 0);
-
-    gtk_grid_attach(GTK_GRID(self->widget), label, 0, line, 1, 1);
-    gtk_grid_attach_next_to(GTK_GRID(self->widget), combobox, label, GTK_POS_RIGHT, 1, 1);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(textview), GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_accepts_tab(GTK_TEXT_VIEW(textview), FALSE);
+    gtk_widget_add_events(textview, GDK_FOCUS_CHANGE_MASK);
+    g_signal_connect(textview, "key-press-event", G_CALLBACK(_key_pressed), self);
+    g_signal_connect(textview, "focus", G_CALLBACK(_textview_focus), self);
+    g_signal_connect(textview, "populate-popup", G_CALLBACK(_populate_popup_multi), self);
+    g_signal_connect(textview, "grab-focus", G_CALLBACK(_got_focus), self);
+    g_signal_connect(textview, "focus-out-event", G_CALLBACK(_lost_focus), self);
+    g_signal_connect(labelev, "button-press-event", G_CALLBACK(_metadata_reset), textview);
+    g_signal_connect(buffer, "changed", G_CALLBACK(_textbuffer_changed), self);
+    d->textview[i] = GTK_TEXT_VIEW(textview);
+    gtk_widget_set_hexpand(textview, TRUE);
+    gtk_widget_set_vexpand(textview, TRUE);
   }
 
-  // clear/apply buttons
+  // apply button
+  d->apply_button = dt_ui_button_new(_("apply"), _("write metadata for selected images"), NULL);
+  g_signal_connect(G_OBJECT(d->apply_button), "clicked", G_CALLBACK(_apply_button_clicked), self);
 
-  grid = GTK_GRID(gtk_grid_new());
-  gtk_grid_set_column_homogeneous(grid, TRUE);
-
-  button = gtk_button_new_with_label(_("clear"));
-  d->clear_button = button;
-  gtk_widget_set_tooltip_text(button, _("remove metadata from selected images"));
-  gtk_grid_attach(grid, button, 0, 0, 1, 1);
-  g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(clear_button_clicked), (gpointer)self);
-
-  button = gtk_button_new_with_label(_("apply"));
-  d->apply_button = button;
-  gtk_widget_set_tooltip_text(button, _("write metadata for selected images"));
-  gtk_grid_attach(grid, button, 1, 0, 1, 1);
-  g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(apply_button_clicked), (gpointer)self);
-
-  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(grid), 0, line, 2, 1);
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(d->apply_button), 0, DT_METADATA_NUMBER, 2, 1);
 
   /* lets signup for mouse over image change signals */
-  dt_control_signal_connect(darktable.signals, DT_SIGNAL_MOUSE_OVER_IMAGE_CHANGE,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_MOUSE_OVER_IMAGE_CHANGE,
                             G_CALLBACK(_mouse_over_image_callback), self);
+
+  // and 2 other interesting signals:
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_SELECTION_CHANGED,
+                            G_CALLBACK(_image_selection_changed_callback), self);
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED,
+                            G_CALLBACK(_collection_updated_callback), self);
+
+  gtk_widget_show_all(self->widget);
+  gtk_widget_set_no_show_all(self->widget, TRUE);
+
+  _update(self);
+  _update_layout(self);
 }
 
 void gui_cleanup(dt_lib_module_t *self)
 {
+  dt_lib_cancel_postponed_update(self);
   const dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
-  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_mouse_over_image_callback), self);
-  dt_gui_key_accel_block_on_focus_disconnect(GTK_WIDGET(gtk_bin_get_child(GTK_BIN(d->publisher))));
-  dt_gui_key_accel_block_on_focus_disconnect(GTK_WIDGET(gtk_bin_get_child(GTK_BIN(d->rights))));
-  dt_gui_key_accel_block_on_focus_disconnect(GTK_WIDGET(gtk_bin_get_child(GTK_BIN(d->title))));
-  dt_gui_key_accel_block_on_focus_disconnect(GTK_WIDGET(gtk_bin_get_child(GTK_BIN(d->description))));
-  dt_gui_key_accel_block_on_focus_disconnect(GTK_WIDGET(gtk_bin_get_child(GTK_BIN(d->creator))));
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_mouse_over_image_callback), self);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_image_selection_changed_callback), self);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_collection_updated_callback), self);
+
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+  {
+    if(dt_metadata_get_type_by_display_order(i) == DT_METADATA_TYPE_INTERNAL)
+      continue;
+    g_signal_handlers_block_by_func(d->textview[i], _lost_focus, self);
+    g_free(d->setting_name[i]);
+  }
   free(self->data);
   self->data = NULL;
 }
 
 static void add_rights_preset(dt_lib_module_t *self, char *name, char *string)
 {
-  const unsigned int params_size = strlen(string) + 5;
+  // to be adjusted the nb of metadata items changes
+  const unsigned int metadata_nb = dt_metadata_get_nb_user_metadata();
+  const unsigned int params_size = strlen(string) + metadata_nb;
 
   char *params = calloc(sizeof(char), params_size);
-  memcpy(params + 2, string, params_size - 5);
-  dt_lib_presets_add(name, self->plugin_name, self->version(), params, params_size);
+  memcpy(params + 4, string, params_size - metadata_nb);
+  dt_lib_presets_add(name, self->plugin_name, self->version(), params, params_size, TRUE);
   free(params);
 }
 
@@ -444,40 +823,98 @@ void init_presets(dt_lib_module_t *self)
                     _("Creative Commons Attribution-NonCommercial-ShareAlike (CC BY-NC-SA)"));
   add_rights_preset(self, _("CC BY-NC-ND"),
                     _("Creative Commons Attribution-NonCommercial-NoDerivs (CC BY-NC-ND)"));
-  add_rights_preset(self, _("all rights reserved"), _("all rights reserved."));
+  add_rights_preset(self, _("all rights reserved"), _("all rights reserved"));
+}
+
+void *legacy_params(dt_lib_module_t *self, const void *const old_params, const size_t old_params_size,
+                    const int old_version, int *new_version, size_t *new_size)
+{
+  if(old_version == 1)
+  {
+    const size_t new_params_size = old_params_size + 1;
+    char *new_params = calloc(sizeof(char), new_params_size);
+
+    const char *buf = (const char *)old_params;
+
+    // <title>\0<description>\0<rights>\0<creator>\0<publisher>
+    const char *metadata[DT_METADATA_NUMBER];
+    size_t metadata_len[DT_METADATA_NUMBER];
+    for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+    {
+      metadata[i] = buf;
+      if(!metadata[i])
+      {
+        free(new_params);
+        return NULL;
+      }
+      metadata_len[i] = strlen(metadata[i]) + 1;
+      buf += metadata_len[i];
+    }
+
+    // <creator>\0<publisher>\0<title>\0<description>\0<rights>
+    size_t pos = 0;
+    memcpy(new_params + pos, metadata[3], metadata_len[3]);
+    pos += metadata_len[3];
+    memcpy(new_params + pos, metadata[4], metadata_len[4]);
+    pos += metadata_len[4];
+    memcpy(new_params + pos, metadata[0], metadata_len[0]);
+    pos += metadata_len[0];
+    memcpy(new_params + pos, metadata[1], metadata_len[1]);
+    pos += metadata_len[1];
+    memcpy(new_params + pos, metadata[2], metadata_len[2]);
+
+    *new_size = new_params_size;
+    *new_version = 2;
+    return new_params;
+  }
+  else if(old_version == 2)
+  {
+    const size_t new_params_size = old_params_size + 1;
+    char *new_params = calloc(sizeof(char), new_params_size);
+
+    memcpy(new_params, old_params, old_params_size);
+
+    *new_size = new_params_size;
+    *new_version = 3;
+    return new_params;
+  }
+  return NULL;
 }
 
 void *get_params(dt_lib_module_t *self, int *size)
 {
   dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
 
-  const char *title = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->title));
-  const char *description = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->description));
-  const char *rights = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->rights));
-  const char *creator = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->creator));
-  const char *publisher = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(d->publisher));
+  *size = 0;
+  char *metadata[DT_METADATA_NUMBER];
+  int32_t metadata_len[DT_METADATA_NUMBER];
 
-  const int32_t title_len = strlen(title) + 1;
-  const int32_t description_len = strlen(description) + 1;
-  const int32_t rights_len = strlen(rights) + 1;
-  const int32_t creator_len = strlen(creator) + 1;
-  const int32_t publisher_len = strlen(publisher) + 1;
-
-  *size = title_len + description_len + rights_len + creator_len + publisher_len;
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+  {
+    if(dt_metadata_get_type_by_display_order(i) == DT_METADATA_TYPE_INTERNAL)
+      continue;
+    const uint32_t keyid = dt_metadata_get_keyid_by_display_order(i);
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer((GtkTextView *)d->textview[i]);
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(buffer, &start, &end);
+    metadata[keyid] = gtk_text_buffer_get_text(buffer, &start, &end, TRUE);
+    if(!metadata[keyid]) metadata[keyid] = g_strdup("");
+    metadata_len[keyid] = strlen(metadata[keyid]) + 1;
+    *size = *size + metadata_len[keyid];
+  }
 
   char *params = (char *)malloc(*size);
 
   int pos = 0;
-  memcpy(params + pos, title, title_len);
-  pos += title_len;
-  memcpy(params + pos, description, description_len);
-  pos += description_len;
-  memcpy(params + pos, rights, rights_len);
-  pos += rights_len;
-  memcpy(params + pos, creator, creator_len);
-  pos += creator_len;
-  memcpy(params + pos, publisher, publisher_len);
-  pos += publisher_len;
+
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+  {
+    if(dt_metadata_get_type_by_display_order(i) == DT_METADATA_TYPE_INTERNAL)
+      continue;
+    memcpy(params + pos, metadata[i], metadata_len[i]);
+    pos += metadata_len[i];
+    g_free(metadata[i]);
+  }
 
   g_assert(pos == *size);
 
@@ -488,49 +925,47 @@ void *get_params(dt_lib_module_t *self, int *size)
 int set_params(dt_lib_module_t *self, const void *params, int size)
 {
   if(!params) return 1;
+  dt_lib_metadata_t *d = (dt_lib_metadata_t *)self->data;
 
   char *buf = (char *)params;
+  char *metadata[DT_METADATA_NUMBER];
+  uint32_t metadata_len[DT_METADATA_NUMBER];
+  uint32_t total_len = 0;
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+  {
+    if(dt_metadata_get_type_by_display_order(i) == DT_METADATA_TYPE_INTERNAL)
+      continue;
+    metadata[i] = buf;
+    if(!metadata[i]) return 1;
+    metadata_len[i] = strlen(metadata[i]) + 1;
+    buf += metadata_len[i];
+    total_len +=  metadata_len[i];
+  }
 
-  const char *title = buf;
-  const int title_len = strlen(title) + 1;
-
-  buf += title_len;
-  const char *description = buf;
-  if(!description) return 1;
-  const int description_len = strlen(description) + 1;
-
-  buf += description_len;
-  const char *rights = buf;
-  if(!rights) return 1;
-  const int rights_len = strlen(rights) + 1;
-
-  buf += rights_len;
-  const char *creator = buf;
-  if(!creator) return 1;
-  const int creator_len = strlen(creator) + 1;
-
-  buf += creator_len;
-  const char *publisher = buf;
-  if(!publisher) return 1;
-  const int publisher_len = strlen(publisher) + 1;
-
-  if(size != title_len + description_len + rights_len + creator_len + publisher_len)
+  if(size != total_len)
     return 1;
 
   GList *key_value = NULL;
 
-  if(title[0] != '\0') _append_kv(&key_value, "Xmp.dc.title", title);
-  if(description[0] != '\0') _append_kv(&key_value, "Xmp.dc.description", description);
-  if(rights[0] != '\0') _append_kv(&key_value, "Xmp.dc.rights", rights);
-  if(creator[0] != '\0') _append_kv(&key_value, "Xmp.dc.creator", creator);
-  if(publisher[0] != '\0') _append_kv(&key_value, "Xmp.dc.publisher", publisher);
+  for(unsigned int i = 0; i < DT_METADATA_NUMBER; i++)
+  {
+    if(dt_metadata_get_type_by_display_order(i) == DT_METADATA_TYPE_INTERNAL)
+      continue;
+    if(metadata[i][0] != '\0') _append_kv(&key_value, dt_metadata_get_key(i), metadata[i]);
+  }
 
-  dt_metadata_set_list(-1, key_value, TRUE, TRUE);
+  GList *imgs = dt_act_on_get_images(FALSE, TRUE, FALSE);
+  dt_metadata_set_list(imgs, key_value, TRUE);
 
   g_list_free(key_value);
 
-  dt_image_synch_xmp(-1);
-  update(self, FALSE);
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_MOUSE_OVER_IMAGE_CHANGE);
+  dt_image_synch_xmps(imgs);
+  g_list_free(imgs);
+  // force the ui refresh to update the info from preset
+  g_list_free(d->last_act_on);
+  d->last_act_on = NULL;
+  _update(self);
   return 0;
 }
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh

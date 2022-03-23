@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2013--2017 pascal obry.
+    Copyright (C) 2013-2021 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -193,13 +193,15 @@ typedef struct dt_iop_bilat_params_t
 
 
 #define LRDT_COLORIN_VERSION 1
-#define DT_IOP_COLOR_ICC_LEN 100
+#define DT_IOP_COLOR_ICC_LEN_V1 100
 
-typedef struct dt_iop_colorin_params_t
+typedef struct dt_iop_colorin_params_v1_t
 {
-  char iccprofile[DT_IOP_COLOR_ICC_LEN];
+  char iccprofile[DT_IOP_COLOR_ICC_LEN_V1];
   dt_iop_color_intent_t intent;
-} dt_iop_colorin_params_t;
+} dt_iop_colorin_params_v1_t;
+
+#undef DT_IOP_COLOR_ICC_LEN_V1
 
 //
 // end of iop structs
@@ -325,7 +327,7 @@ static float lr2dt_clarity(float value)
 }
 
 static void dt_add_hist(int imgid, char *operation, dt_iop_params_t *params, int params_size, char *imported,
-                        size_t imported_len, int version, int *import_count, const double iop_order)
+                        size_t imported_len, int version, int *import_count)
 {
   int32_t num = 0;
   dt_develop_blend_params_t blend_params = { 0 };
@@ -343,9 +345,10 @@ static void dt_add_hist(int imgid, char *operation, dt_iop_params_t *params, int
 
   // add new history info
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
-                              "INSERT INTO main.history (imgid, num, module, operation, op_params, enabled, "
-                              "blendop_params, blendop_version, multi_priority, multi_name, iop_order) "
-                              "VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, 0, ' ', ?8)",
+                              "INSERT INTO main.history"
+                              "  (imgid, num, module, operation, op_params, enabled,"
+                              "   blendop_params, blendop_version, multi_priority, multi_name)"
+                              " VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, 0, ' ')",
                               -1, &stmt, NULL);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, num);
@@ -354,15 +357,17 @@ static void dt_add_hist(int imgid, char *operation, dt_iop_params_t *params, int
   DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 5, params, params_size, SQLITE_TRANSIENT);
   DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 6, &blend_params, sizeof(dt_develop_blend_params_t), SQLITE_TRANSIENT);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 7, LRDT_BLEND_VERSION);
-  DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 8, iop_order);
 
   sqlite3_step(stmt);
   sqlite3_finalize(stmt);
 
   // also bump history_end
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
-                              "UPDATE main.images SET history_end = (SELECT IFNULL(MAX(num) + 1, 0) FROM "
-                              "main.history WHERE imgid = ?1) WHERE id = ?1", -1, &stmt, NULL);
+                              "UPDATE main.images"
+                              " SET history_end = (SELECT IFNULL(MAX(num) + 1, 0)"
+                              "                    FROM main.history"
+                              "                    WHERE imgid = ?1)"
+                              " WHERE id = ?1", -1, &stmt, NULL);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
   sqlite3_step(stmt);
   sqlite3_finalize(stmt);
@@ -845,6 +850,7 @@ static void _lrop(const dt_develop_t *dev, const xmlDocPtr doc, const int imgid,
   {
     xmlNodePtr tagNode = node;
 
+    gboolean tag_change = FALSE;
     while(tagNode)
     {
       if(!xmlStrcmp(tagNode->name, (const xmlChar *)"li"))
@@ -853,12 +859,13 @@ static void _lrop(const dt_develop_t *dev, const xmlDocPtr doc, const int imgid,
         guint tagid = 0;
         if(!dt_tag_exists((char *)cvalue, &tagid)) dt_tag_new((char *)cvalue, &tagid);
 
-        dt_tag_attach_from_gui(tagid, imgid, FALSE, FALSE);
+        if(dt_tag_attach(tagid, imgid, FALSE, FALSE)) tag_change = TRUE;
         data->has_tags = TRUE;
         xmlFree(cvalue);
       }
       tagNode = tagNode->next;
     }
+    if(tag_change) DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_TAG_CHANGED);
   }
   else if(dev != NULL && !xmlStrcmp(name, (const xmlChar *)"RetouchInfo"))
   {
@@ -924,7 +931,7 @@ static void _lrop(const dt_develop_t *dev, const xmlDocPtr doc, const int imgid,
       if(!xmlStrncmp(ttlNode->name, (const xmlChar *)"li", 2))
       {
         xmlChar *cvalue = xmlNodeListGetString(doc, ttlNode->xmlChildrenNode, 1);
-        dt_metadata_set(imgid, "Xmp.dc.title", (char *)cvalue, FALSE, FALSE);
+        dt_metadata_set_import(imgid, "Xmp.dc.title", (char *)cvalue);
         xmlFree(cvalue);
       }
       ttlNode = ttlNode->next;
@@ -938,7 +945,7 @@ static void _lrop(const dt_develop_t *dev, const xmlDocPtr doc, const int imgid,
       if(!xmlStrncmp(desNode->name, (const xmlChar *)"li", 2))
       {
         xmlChar *cvalue = xmlNodeListGetString(doc, desNode->xmlChildrenNode, 1);
-        dt_metadata_set(imgid, "Xmp.dc.description", (char *)cvalue, FALSE, FALSE);
+        dt_metadata_set_import(imgid, "Xmp.dc.description", (char *)cvalue);
         xmlFree(cvalue);
       }
       desNode = desNode->next;
@@ -952,7 +959,7 @@ static void _lrop(const dt_develop_t *dev, const xmlDocPtr doc, const int imgid,
       if(!xmlStrncmp(creNode->name, (const xmlChar *)"li", 2))
       {
         xmlChar *cvalue = xmlNodeListGetString(doc, creNode->xmlChildrenNode, 1);
-        dt_metadata_set(imgid, "Xmp.dc.creator", (char *)cvalue, FALSE, FALSE);
+        dt_metadata_set_import(imgid, "Xmp.dc.creator", (char *)cvalue);
         xmlFree(cvalue);
       }
       creNode = creNode->next;
@@ -966,7 +973,7 @@ static void _lrop(const dt_develop_t *dev, const xmlDocPtr doc, const int imgid,
       if(!xmlStrncmp(rigNode->name, (const xmlChar *)"li", 2))
       {
         xmlChar *cvalue = xmlNodeListGetString(doc, rigNode->xmlChildrenNode, 1);
-        dt_metadata_set(imgid, "Xmp.dc.rights", (char *)cvalue, FALSE, FALSE);
+        dt_metadata_set_import(imgid, "Xmp.dc.rights", (char *)cvalue);
         xmlFree(cvalue);
       }
       rigNode = rigNode->next;
@@ -1058,7 +1065,7 @@ static inline float round5(double x)
   return round(x * 100000.f) / 100000.f;
 }
 
-void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
+gboolean dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
 {
   gboolean refresh_needed = FALSE;
   char imported[256] = { 0 };
@@ -1070,7 +1077,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
   if(!pathname)
   {
     if(!iauto) dt_control_log(_("cannot find lightroom XMP!"));
-    return;
+    return FALSE;
   }
 
   // Load LR xmp
@@ -1085,7 +1092,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
   if(doc == NULL)
   {
     g_free(pathname);
-    return;
+    return FALSE ;
   }
 
   // Enter first node, xmpmeta
@@ -1096,14 +1103,14 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
   {
     g_free(pathname);
     xmlFreeDoc(doc);
-    return;
+    return FALSE;
   }
 
   if(xmlStrcmp(entryNode->name, (const xmlChar *)"xmpmeta"))
   {
     if(!iauto) dt_control_log(_("`%s' not a lightroom XMP!"), pathname);
     g_free(pathname);
-    return;
+    return FALSE;
   }
 
   // Check that this is really a Lightroom document
@@ -1114,7 +1121,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
   {
     g_free(pathname);
     xmlFreeDoc(doc);
-    return;
+    return FALSE;
   }
 
   xmlXPathRegisterNs(xpathCtx, BAD_CAST "stEvt", BAD_CAST "http://ns.adobe.com/xap/1.0/sType/ResourceEvent#");
@@ -1127,7 +1134,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     xmlXPathFreeContext(xpathCtx);
     g_free(pathname);
     xmlFreeDoc(doc);
-    return;
+    return FALSE;
   }
 
   xmlNodeSetPtr xnodes = xpathObj->nodesetval;
@@ -1137,7 +1144,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     xmlNodePtr xnode = xnodes->nodeTab[0];
     xmlChar *value = xmlNodeListGetString(doc, xnode->xmlChildrenNode, 1);
 
-    if(!strstr((char *)value, "Lightroom"))
+    if(!strstr((char *)value, "Lightroom") && !strstr((char *)value, "Camera Raw"))
     {
       xmlXPathFreeContext(xpathCtx);
       xmlXPathFreeObject(xpathObj);
@@ -1145,7 +1152,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
       xmlFree(value);
       if(!iauto) dt_control_log(_("`%s' not a lightroom XMP!"), pathname);
       g_free(pathname);
-      return;
+      return FALSE;
     }
     xmlFree(value);
   }
@@ -1246,10 +1253,10 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
   if(dev != NULL && dt_image_is_raw(&dev->image_storage))
   {
     // set colorin to cmatrix which is the default from Adobe (so closer to what Lightroom does)
-    dt_iop_colorin_params_t pci = (dt_iop_colorin_params_t){ "cmatrix", DT_INTENT_PERCEPTUAL };
+    dt_iop_colorin_params_v1_t pci = (dt_iop_colorin_params_v1_t){ "cmatrix", DT_INTENT_PERCEPTUAL };
 
-    dt_add_hist(imgid, "colorin", (dt_iop_params_t *)&pci, sizeof(dt_iop_colorin_params_t), imported,
-                sizeof(imported), LRDT_COLORIN_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "colorin"));
+    dt_add_hist(imgid, "colorin", (dt_iop_params_t *)&pci, sizeof(dt_iop_colorin_params_v1_t), imported,
+                sizeof(imported), LRDT_COLORIN_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1315,7 +1322,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     data.fratio = (data.pc.cw - data.pc.cx) / (data.pc.ch - data.pc.cy);
 
     dt_add_hist(imgid, "clipping", (dt_iop_params_t *)&data.pc, sizeof(dt_iop_clipping_params_t), imported,
-                sizeof(imported), LRDT_CLIPPING_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "clipping"));
+                sizeof(imported), LRDT_CLIPPING_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1324,14 +1331,14 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     data.pf.orientation = dt_image_orientation_to_flip_bits(data.orientation);
 
     dt_add_hist(imgid, "flip", (dt_iop_params_t *)&data.pf, sizeof(dt_iop_flip_params_t), imported,
-                sizeof(imported), LRDT_FLIP_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "flip"));
+                sizeof(imported), LRDT_FLIP_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
   if(dev != NULL && data.has_exposure)
   {
     dt_add_hist(imgid, "exposure", (dt_iop_params_t *)&data.pe, sizeof(dt_iop_exposure_params_t), imported,
-                sizeof(imported), LRDT_EXPOSURE_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "exposure"));
+                sizeof(imported), LRDT_EXPOSURE_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1340,7 +1347,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     data.pg.channel = 0;
 
     dt_add_hist(imgid, "grain", (dt_iop_params_t *)&data.pg, sizeof(dt_iop_grain_params_t), imported,
-                sizeof(imported), LRDT_GRAIN_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "grain"));
+                sizeof(imported), LRDT_GRAIN_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1376,7 +1383,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     }
 
     dt_add_hist(imgid, "vignette", (dt_iop_params_t *)&data.pv, sizeof(dt_iop_vignette_params_t), imported,
-                sizeof(imported), LRDT_VIGNETTE_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "vignette"));
+                sizeof(imported), LRDT_VIGNETTE_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1395,7 +1402,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
       }
 
     dt_add_hist(imgid, "spots", (dt_iop_params_t *)&data.ps, sizeof(dt_iop_spots_params_t), imported,
-                sizeof(imported), LRDT_SPOTS_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "spots"));
+                sizeof(imported), LRDT_SPOTS_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1463,7 +1470,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     }
 
     dt_add_hist(imgid, "tonecurve", (dt_iop_params_t *)&data.ptc, sizeof(dt_iop_tonecurve_params_t), imported,
-                sizeof(imported), LRDT_TONECURVE_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "tonecurve"));
+                sizeof(imported), LRDT_TONECURVE_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1476,7 +1483,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
         data.pcz.equalizer_x[i][k] = k / (DT_IOP_COLORZONES_BANDS - 1.0);
 
     dt_add_hist(imgid, "colorzones", (dt_iop_params_t *)&data.pcz, sizeof(dt_iop_colorzones_params_t), imported,
-                sizeof(imported), LRDT_COLORZONES_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "colorzones"));
+                sizeof(imported), LRDT_COLORZONES_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1485,7 +1492,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     data.pst.compress = 50.0;
 
     dt_add_hist(imgid, "splittoning", (dt_iop_params_t *)&data.pst, sizeof(dt_iop_splittoning_params_t), imported,
-                sizeof(imported), LRDT_SPLITTONING_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "splittoning"));
+                sizeof(imported), LRDT_SPLITTONING_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1495,7 +1502,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     data.pbl.sigma_s = 100.0;
 
     dt_add_hist(imgid, "bilat", (dt_iop_params_t *)&data.pbl, sizeof(dt_iop_bilat_params_t), imported,
-                sizeof(imported), LRDT_BILAT_VERSION, &n_import, dt_ioppr_get_iop_order(dev->iop_order_list, "bilat"));
+                sizeof(imported), LRDT_BILAT_VERSION, &n_import);
     refresh_needed = TRUE;
   }
 
@@ -1508,7 +1515,7 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
 
   if(dev == NULL && data.has_rating)
   {
-    dt_ratings_apply(imgid, data.rating, FALSE, FALSE, FALSE);
+    dt_ratings_apply_on_image(imgid, data.rating, FALSE, FALSE, FALSE);
 
     if(imported[0]) g_strlcat(imported, ", ", sizeof(imported));
     g_strlcat(imported, _("rating"), sizeof(imported));
@@ -1522,6 +1529,9 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
     geoloc.latitude = data.lat;
     geoloc.elevation = NAN;
     dt_image_set_location(imgid, &geoloc, FALSE, FALSE);
+    GList *imgs = NULL;
+    imgs = g_list_prepend(imgs, GINT_TO_POINTER(imgid));
+    DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_GEOTAG_CHANGED, imgs, 0);
 
     if(imported[0]) g_strlcat(imported, ", ", sizeof(imported));
     g_strlcat(imported, _("geotagging"), sizeof(imported));
@@ -1548,9 +1558,10 @@ void dt_lightroom_import(int imgid, dt_develop_t *dev, gboolean iauto)
       dt_dev_modulegroups_set(darktable.develop, dt_dev_modulegroups_get(darktable.develop));
       /* update xmp file */
       dt_image_synch_xmp(imgid);
-      dt_control_signal_raise(darktable.signals, DT_SIGNAL_DEVELOP_HISTORY_CHANGE);
+      DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_DEVELOP_HISTORY_CHANGE);
     }
   }
+  return TRUE;
 }
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

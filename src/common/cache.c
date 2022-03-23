@@ -1,7 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2014 johannes hanika.
-    copyright (c) 2015 LebedevRI
+    Copyright (C) 2011-2021 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -50,8 +49,7 @@ void dt_cache_init(
 void dt_cache_cleanup(dt_cache_t *cache)
 {
   g_hash_table_destroy(cache->hashtable);
-  GList *l = cache->lru;
-  while(l)
+  for(GList *l = cache->lru; l; l = g_list_next(l))
   {
     dt_cache_entry_t *entry = (dt_cache_entry_t *)l->data;
 
@@ -67,7 +65,6 @@ void dt_cache_cleanup(dt_cache_t *cache)
 
     dt_pthread_rwlock_destroy(&entry->lock);
     g_slice_free1(sizeof(*entry), entry);
-    l = g_list_next(l);
   }
   g_list_free(cache->lru);
   dt_pthread_mutex_destroy(&cache->lock);
@@ -111,7 +108,6 @@ dt_cache_entry_t *dt_cache_testget(dt_cache_t *cache, const uint32_t key, char m
 {
   gpointer orig_key, value;
   gboolean res;
-  int result;
   double start = dt_get_wtime();
   dt_pthread_mutex_lock(&cache->lock);
   res = g_hash_table_lookup_extended(
@@ -120,8 +116,8 @@ dt_cache_entry_t *dt_cache_testget(dt_cache_t *cache, const uint32_t key, char m
   {
     dt_cache_entry_t *entry = (dt_cache_entry_t *)value;
     // lock the cache entry
-    if(mode == 'w') result = dt_pthread_rwlock_trywrlock(&entry->lock);
-    else            result = dt_pthread_rwlock_tryrdlock(&entry->lock);
+    const int result
+        = (mode == 'w') ? dt_pthread_rwlock_trywrlock(&entry->lock) : dt_pthread_rwlock_tryrdlock(&entry->lock);
     if(result)
     { // need to give up mutex so other threads have a chance to get in between and
       // free the lock we're trying to acquire:

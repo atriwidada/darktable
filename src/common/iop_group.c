@@ -1,7 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2018 Pascal Obry
-    copyright (c) 2019 tobias ellinghaus
+    Copyright (C) 2018-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU Lesser General Public License as published by
@@ -33,7 +32,7 @@ static int _group_number(int group_id)
 
 int dt_iop_get_group(const dt_iop_module_t *module)
 {
-  gchar *key = dt_util_dstrcat(NULL, "plugins/darkroom/%s/modulegroup", module->op);
+  gchar *key = g_strdup_printf("plugins/darkroom/%s/modulegroup", module->op);
   int prefs = dt_conf_get_int(key);
 
   /* if zero, not found, record it */
@@ -45,7 +44,7 @@ int dt_iop_get_group(const dt_iop_module_t *module)
   }
   else
   {
-    gchar *g_key = dt_util_dstrcat(NULL, "plugins/darkroom/group_order/%d", prefs);
+    gchar *g_key = g_strdup_printf("plugins/darkroom/group_order/%d", prefs);
     prefs = dt_conf_get_int(g_key);
 
     prefs = 1 << (prefs - 1);

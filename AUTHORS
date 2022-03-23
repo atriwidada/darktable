@@ -1,93 +1,84 @@
 * developers:
 Pascal Obry
+Aurélien PIERRE
 Aldric Renaudin
-Roman Lebedev
-Tobias Ellinghaus
-Ulrich Pegelow
 parafin
-Pascal de Bruijn
-Stefan Schöfegger
-Peter Budai
-johannes hanika
-Edouard Gomez
+Roman Lebedev
 
 * translators:
 Pascal Obry
-Ger Siemerink
-EdgarLux
-Timur I. Davletshin
-Michel Leblond
-Nilvus
-Jakub Filipowicz
-Matjaž Jeran
-Heiko Bauke
-Josep V. Moragues
-Milan Knížek
-Song Li
-Tomasz Golinski
-maruncz
-Jacques Le Clerc
-Marko Vertainen
-Maurizio Paglia
-Tobias Ellinghaus
-mepi0011
-miroslavfikar
-shlomi braitbart
-Denis Dyakov
-Edgar De la Luz
 Jeronimo Pellegrini
-Magnus Claesson
-Ragnar Wisloff
-Shlomi Alon-Braitbart
-Simon Raffeiner
-Tomasz Goliński
-archont00
-johannes hanika
-lkarcz
+Martin Straeten
+EdgarLux
+Marcus Gama
+Matt Maguire
+篠崎亮　Ryo Shinozaki
+Philippe Weyland
+Victor Forsiuk
+vertama
+Matjaž Jeran
+Aurélien PIERRE
+Matteo Mardegan
+Miloš Komarčević
+Michel Leblond
+Nicolas Auffray
+Tianhao Chai
+Bogusław Ciastek
+Báthory Péter
+PeterWem
+Tomasz Golinski
+Wiktor Nowak
+sbraitbart
 
 * contributors (at least 4 commits):
-Aurélien PIERRE
-Andreas Schneider
-edgardoh
-rawfiner
-Philippe Weyland
-Ger Siemerink
-Nilvus
-Heiko Bauke
-EdgarLux
-hanno@schwalm-bremen.de
-Jakub Filipowicz
-Jacques Le Clerc
-Timur I. Davletshin
-Michel Leblond
-Bill Ferguson
-Sam Smith
-Alexis Mousset
-Matjaž Jeran
-Matthieu Moy
-Rikard Öxler
-junkyardsparkle
-Denis Dyakov
+ralfbrown
 Diederik ter Rahe
-Hanno Schwalm
-luzpaz
 Dan Torop
-Marcello Mamino
-Wolfgang Goetz
-mepi0011
-Josep V. Moragues
-maruncz
-mondoman712
+Hubert Kowalski
+Philippe Weyland
+Miloš Komarčević
+Bill Ferguson
+Jeronimo Pellegrini
+hanno@schwalm-bremen.de
+Marco Carrarini
+Martin Straeten
+Daniel Vogelbacher
+Mark-64
+EdgarLux
+rawfiner
+Nicolas Auffray
+Chris Elston
+Chris.Elston
+Marcus Gama
+Sakari Kapanen
+Victor Forsiuk
+Arnaud TANGUY
+wpferguson
+Matt Maguire
+David-Tillmann Schaefer
+Marco
+Paolo DePetrillo
+quovadit
+篠崎亮　Ryo Shinozaki
+vertama
+Matjaž Jeran
+darkelectron
+piratenpanda
 
 * Sub-module rawspeed contributors (at least 1 commit):
 Roman Lebedev
-Robert Bridge
-bobobo1618
-luz.paz
-Bastian Bechtold
-Pascal de Bruijn
-dllu
+Jordan Neumeyer
+Miloš Komarčević
+Andreas Schneider
+Marko Toplak
 hanno@schwalm-bremen.de
-junkyardsparkle
+helloqiu
+luz paz
+
+* Sub-module integration contributors (at least 1 commit):
+Pascal Obry
+Sakari Kapanen
+ralfbrown
+Aurélien PIERRE
 
 And all those of you that made previous releases possible

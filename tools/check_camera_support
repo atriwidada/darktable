@@ -6,7 +6,6 @@ require 'json'
 class CameraSupportState
   SOURCE_FILES={
     :cameras => "src/external/rawspeed/data/cameras.xml",
-    :coeffs => "src/external/adobe_coeff.c",
     :wbpresets => "src/external/wb_presets.c",
     :colormatrices => "src/common/colormatrices.c",
     :noiseprofiles => "data/noiseprofiles.json",
@@ -61,7 +60,10 @@ class CameraSupportState
 
   def get_maker_model(file)
     def get_exif_key(key, file)
-      IO.popen("exiv2 -g \"#{key}\" -Pt \"#{file}\" 2>/dev/null","r").read
+      f = IO.popen("exiv2 -g \"#{key}\" -Pt \"#{file}\" 2>/dev/null","r")
+      c = f.read
+      f.close
+      return c
     end
 
     maker = get_exif_key("Exif.Image.Make", file)
@@ -70,7 +72,8 @@ class CameraSupportState
     model = model[0..5] == "NX2000" ? "NX2000" : model.strip
 
     if (maker == "" || model == "") # Try with rawspeed instead
-      IO.popen("darktable-rs-identify \"#{file}\"","r").each do |line|
+      f = IO.popen("/opt/darktable/bin/darktable-rs-identify \"#{file}\"","r")
+      f.each do |line|
         parts = line.split(":")
         case parts[0].strip
         when "make"
@@ -79,6 +82,7 @@ class CameraSupportState
           model = parts[1..-1].join(":").strip
         end
       end
+      f.close
     end
     return [maker,model]
   end
@@ -207,9 +211,8 @@ class CameraSupportState
   end
 
   def default_listing(verbose_mode, quiet_mode)
-    puts "Found #{@rawspeed_cameras.size} cameras #{@coeffs_cameras.size} adobe_coeffs #{@presets_cameras.size} wb_coeffs #{@colormatrices_cameras.size} colormatrices #{@noiseprofiles_cameras.size} noise profiles #{@samples_cameras.size} samples"
+    puts "Found #{@rawspeed_cameras.size} cameras #{@presets_cameras.size} wb_coeffs #{@colormatrices_cameras.size} colormatrices #{@noiseprofiles_cameras.size} noise profiles #{@samples_cameras.size} samples"
     rawspeed_coeffs_cameras = @rawspeed_cameras.select{|id| !@rawspeed_dngs[id]}
-    compare_lists("adobe_coeffs", @rawspeed_cameras, @coeffs_cameras, !quiet_mode, verbose_mode)
     compare_lists("wb_presets", @rawspeed_cameras, @presets_cameras, verbose_mode, !quiet_mode)
     compare_lists("colormatrices", @rawspeed_cameras, @colormatrices_cameras, verbose_mode, !quiet_mode)
     compare_lists("noiseprofiles", @rawspeed_cameras, @noiseprofiles_cameras, verbose_mode, !quiet_mode)

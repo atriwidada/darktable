@@ -1,10 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2010 johannes hanika.
-    copyright (c) 2010--2013 henrik andersson.
-    Copyright (c) 2012 James C. McPherson
-    copyright (c) 2014 tobias ellinghaus.
-    copyright (c) 2015 LebedevRI.
+    Copyright (C) 2009-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -609,7 +605,7 @@ double dt_control_job_get_progress(dt_job_t *job)
 void dt_control_jobs_init(dt_control_t *control)
 {
   // start threads
-  control->num_threads = CLAMP(dt_conf_get_int("worker_threads"), 1, 8);
+  control->num_threads = dt_worker_threads();
   control->thread = (pthread_t *)calloc(control->num_threads, sizeof(pthread_t));
   control->job = (dt_job_t **)calloc(control->num_threads, sizeof(dt_job_t *));
   dt_pthread_mutex_lock(&control->run_mutex);
@@ -637,6 +633,10 @@ void dt_control_jobs_init(dt_control_t *control)
     params->threadid = k;
     dt_pthread_create(&control->thread_res[k], dt_control_work_res, params);
   }
+  /* create thread taking care of connecting gphoto2 devices */
+#ifdef HAVE_GPHOTO2
+  dt_pthread_create(&control->update_gphoto_thread, dt_update_cameras_thread, control);
+#endif
 }
 
 void dt_control_jobs_cleanup(dt_control_t *control)

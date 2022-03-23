@@ -1,7 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2010 henrik andersson.
-    copyright (c) 2010--2017 tobias ellinghaus.
+    Copyright (C) 2010-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -39,6 +38,12 @@ typedef struct dt_variables_params_t
   /** internal variables data */
   struct dt_variables_data_t *data;
 
+  /** do we need to escape variables text for markup ? */
+  gboolean escape_markup;
+
+  /** img cache already controlled */
+  void *img;
+
 } dt_variables_params_t;
 
 /** allocate and initializes a dt_variables_params_t. */
@@ -47,10 +52,12 @@ void dt_variables_params_init(dt_variables_params_t **params);
 void dt_variables_params_destroy(dt_variables_params_t *params);
 /** set max image width and height defined for an export session in a dt_variables_params_t. */
 void dt_variables_set_max_width_height(dt_variables_params_t *params, int max_width, int max_height);
+/** set upscale allowed flag for an export session in a dt_variables_params_t. */
+void dt_variables_set_upscale(dt_variables_params_t *params, gboolean upscale);
 /** set the time in a dt_variables_params_t. */
-void dt_variables_set_time(dt_variables_params_t *params, time_t time);
+void dt_variables_set_time(dt_variables_params_t *params, const char *time);
 /** set the time to use for EXIF variables */
-void dt_variables_set_exif_time(dt_variables_params_t *params, time_t time);
+void dt_variables_set_exif_time(dt_variables_params_t *params, const char *time);
 /** set flags for tags to be exported */
 void dt_variables_set_tags_flags(dt_variables_params_t *params, uint32_t flags);
 

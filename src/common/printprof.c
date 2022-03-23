@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2014-2015 pascal obry
+    Copyright (C) 2014-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -65,7 +65,7 @@ int dt_apply_printer_profile(void **in, uint32_t width, uint32_t height, int bpp
     return 1;
   }
 
-  void *out = (void *)malloc(width*height*3);
+  void *out = (void *)malloc((size_t)3 * width * height);
 
   if (bpp == 8)
   {

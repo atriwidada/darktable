@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2011 johannes hanika.
+    Copyright (C) 2010-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -25,9 +25,9 @@ extern "C" {
 #include "common/image.h"
 #include "common/mipmap_cache.h"
 
-void dt_rawspeed_lookup_makermodel(const char *maker, const char *model,
-                                   char *mk, int mk_len, char *md, int md_len,
-                                   char *al, int al_len);
+gboolean dt_rawspeed_lookup_makermodel(const char *maker, const char *model,
+                                       char *mk, int mk_len, char *md, int md_len,
+                                       char *al, int al_len);
 
 uint32_t dt_rawspeed_crop_dcraw_filters(uint32_t filters, uint32_t crop_x, uint32_t crop_y);
 

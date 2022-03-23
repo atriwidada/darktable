@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2012 tobias ellinghaus.
+    Copyright (C) 2012-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -69,7 +69,6 @@ sample debug callback expecting no client object
 
 static int get_file_format(const char *filename)
 {
-  unsigned int i;
   static const char *extension[] = { "j2k", "jp2", "jpt", "j2c", "jpc" };
   static const int format[] = { J2K_CFMT, JP2_CFMT, JPT_CFMT, J2K_CFMT, J2K_CFMT };
   char *ext = strrchr(filename, '.');
@@ -77,7 +76,7 @@ static int get_file_format(const char *filename)
   ext++;
   if(*ext)
   {
-    for(i = 0; i < sizeof(format) / sizeof(*format); i++)
+    for(unsigned int i = 0; i < sizeof(format) / sizeof(*format); i++)
     {
       if(strncasecmp(ext, extension[i], 3) == 0)
       {
@@ -163,6 +162,16 @@ dt_imageio_retval_t dt_imageio_open_j2k(dt_image_t *img, const char *filename, d
   opj_set_error_handler(d_codec, error_callback, stderr);
   // opj_set_warning_handler(d_codec, error_callback, stderr);
   // opj_set_info_handler(d_codec, error_callback, stderr);
+
+  /* Decode JPEG-2000 with using multiple threads */
+  if(!opj_codec_set_threads(d_codec, darktable.num_openmp_threads))
+  {
+    /* This may not seem like a critical error but failure to initialise the treads
+     is a symptom of major resource exhaustion, bail out as quickly as possible */
+    fprintf(stderr, "[j2k_open] Error: failed to setup the threads for decoder %s\n", parameters.infile);
+    opj_destroy_codec(d_codec);
+    return DT_IMAGEIO_FILE_CORRUPTED;
+  }
 
   /* setup the decoder decoding parameters using user parameters */
   if(!opj_setup_decoder(d_codec, &parameters))
@@ -297,6 +306,7 @@ dt_imageio_retval_t dt_imageio_open_j2k(dt_image_t *img, const char *filename, d
         buf[i * 4 + k] = (float)(image->comps[k].data[i] + signed_offsets[k]) / float_divs[k];
   }
 
+  img->loader = LOADER_J2K;
   ret = DT_IMAGEIO_OK;
 
 end_of_the_world:
@@ -318,7 +328,6 @@ int dt_imageio_j2k_read_profile(const char *filename, uint8_t **out)
   opj_codec_t *d_codec = NULL;
   OPJ_CODEC_FORMAT codec;
   opj_stream_t *d_stream = NULL; /* Stream */
-  gboolean res = FALSE;
   unsigned int length = 0;
   *out = NULL;
 
@@ -420,14 +429,11 @@ int dt_imageio_j2k_read_profile(const char *filename, uint8_t **out)
     goto another_end_of_the_world;
   }
 
-  if(image->icc_profile_buf)
+  if(image->icc_profile_len > 0 && image->icc_profile_buf)
   {
-    res = TRUE;
     length = image->icc_profile_len;
-    *out = image->icc_profile_buf;
-
-    image->icc_profile_buf = NULL;
-    image->icc_profile_len = 0;
+    *out = (uint8_t *)g_malloc(image->icc_profile_len);
+    memcpy(*out, image->icc_profile_buf, image->icc_profile_len);
   }
 
 another_end_of_the_world:
@@ -437,7 +443,7 @@ another_end_of_the_world:
   /* free image data structure */
   opj_image_destroy(image);
 
-  return res ? length : 0;
+  return length;
 }
 
 
@@ -587,36 +593,30 @@ static void sycc422_to_rgb(opj_image_t *img)
 
 static void sycc420_to_rgb(opj_image_t *img)
 {
-  int *d0, *d1, *d2, *r, *g, *b, *nr, *ng, *nb;
-  const int *y, *cb, *cr, *ny;
-  size_t maxw, maxh, max;
-  int offset, upb;
-  int i, j;
+  const int offset = 1 << (img->comps[0].prec - 1);
+  const int upb = (1 << img->comps[0].prec) - 1;
 
-  i = img->comps[0].prec;
-  offset = 1 << (i - 1);
-  upb = (1 << i) - 1;
+  size_t maxw = img->comps[0].w;
+  size_t maxh = img->comps[0].h;
+  size_t max = maxw * maxh;
 
-  maxw = img->comps[0].w;
-  maxh = img->comps[0].h;
-  max = maxw * maxh;
+  const int *y = img->comps[0].data;
+  const int *cb = img->comps[1].data;
+  const int *cr = img->comps[2].data;
 
-  y = img->comps[0].data;
-  cb = img->comps[1].data;
-  cr = img->comps[2].data;
-
+  int *d0, *d1, *d2, *r, *g, *b;
   d0 = r = (int *)calloc(max, sizeof(int));
   d1 = g = (int *)calloc(max, sizeof(int));
   d2 = b = (int *)calloc(max, sizeof(int));
 
-  for(i = 0; i < maxh; i += 2)
+  for(int i = 0; i < maxh; i += 2)
   {
-    ny = y + maxw;
-    nr = r + maxw;
-    ng = g + maxw;
-    nb = b + maxw;
+    const int *ny = y + maxw;
+    int *nr = r + maxw;
+    int *ng = g + maxw;
+    int *nb = b + maxw;
 
-    for(j = 0; j < maxw; j += 2)
+    for(int j = 0; j < maxw; j += 2)
     {
       sycc_to_rgb(offset, upb, *y, *cb, *cr, r, g, b);
       ++y;

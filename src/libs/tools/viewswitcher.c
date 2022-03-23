@@ -1,7 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2011 Henrik Andersson.
-    copyright (c) 2016 tobias ellinghaus.
+    Copyright (C) 2011-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -25,6 +24,7 @@
 #include "develop/develop.h"
 #include "dtgtk/button.h"
 #include "gui/gtk.h"
+#include "gui/accelerators.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
 
@@ -51,6 +51,8 @@ static GtkWidget *_lib_viewswitcher_create_label(dt_view_t *view);
 /* callback when view changed signal happens */
 static void _lib_viewswitcher_view_changed_callback(gpointer instance, dt_view_t *old_view,
                                                     dt_view_t *new_view, gpointer user_data);
+static void _lib_viewswitcher_view_cannot_change_callback(gpointer instance, dt_view_t *old_view,
+                                                          dt_view_t *new_view, gpointer user_data);
 static void _switch_view(const dt_view_t *view);
 
 const char *name(dt_lib_module_t *self)
@@ -119,6 +121,8 @@ void gui_init(dt_lib_module_t *self)
       gtk_box_pack_start(GTK_BOX(self->widget), w, FALSE, FALSE, 0);
       d->labels = g_list_append(d->labels, gtk_bin_get_child(GTK_BIN(w)));
 
+      dt_action_define(&darktable.control->actions_global, "switch views", view->module_name, w, NULL);
+
       /* create space if more views */
       if(view_iter->next != NULL)
       {
@@ -142,9 +146,7 @@ void gui_init(dt_lib_module_t *self)
                                         "sensitive", SENSITIVE_COLUMN, NULL);
 
         gtk_list_store_append(model, &tree_iter);
-//         char *italic = g_strdup_printf("<i>%s</i>", _("other"));
         gtk_list_store_set(model, &tree_iter, TEXT_COLUMN, /*italic*/ _("other"), VIEW_COLUMN, NULL, SENSITIVE_COLUMN, 0, -1);
-//         g_free(italic);
 
         gtk_box_pack_start(GTK_BOX(self->widget), d->dropdown, FALSE, FALSE, 0);
         g_signal_connect(G_OBJECT(d->dropdown), "changed", G_CALLBACK(_dropdown_changed), d);
@@ -158,37 +160,42 @@ void gui_init(dt_lib_module_t *self)
   if(model) g_object_unref(model);
 
   /* connect callback to view change signal */
-  dt_control_signal_connect(darktable.signals, DT_SIGNAL_VIEWMANAGER_VIEW_CHANGED,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_VIEWMANAGER_VIEW_CHANGED,
                             G_CALLBACK(_lib_viewswitcher_view_changed_callback), self);
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_VIEWMANAGER_VIEW_CANNOT_CHANGE,
+                                  G_CALLBACK(_lib_viewswitcher_view_cannot_change_callback), self);
 }
 
 void gui_cleanup(dt_lib_module_t *self)
 {
-  dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_lib_viewswitcher_view_changed_callback), self);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_lib_viewswitcher_view_changed_callback), self);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_lib_viewswitcher_view_cannot_change_callback), self);
   g_free(self->data);
   self->data = NULL;
 }
 
-static void _lib_viewswitcher_enter_notify_callback(GtkWidget *w, GdkEventCrossing *e, gpointer user_data)
+static void _lib_viewswitcher_enter_leave_notify_callback(GtkWidget *w, GdkEventCrossing *e, gpointer user_data)
 {
   GtkLabel *l = (GtkLabel *)user_data;
 
   /* if not active view lets highlight */
-  if(strcmp(g_object_get_data(G_OBJECT(w), "view-label"), dt_view_manager_name(darktable.view_manager)))
-  {
-    gtk_widget_set_state_flags(GTK_WIDGET(l), GTK_STATE_FLAG_PRELIGHT, TRUE);
-  }
+  if(e->type == GDK_ENTER_NOTIFY &&
+     strcmp(g_object_get_data(G_OBJECT(w), "view-label"), dt_view_manager_name(darktable.view_manager)))
+    gtk_widget_set_state_flags(GTK_WIDGET(l), GTK_STATE_FLAG_PRELIGHT, FALSE);
+  else
+    gtk_widget_unset_state_flags(GTK_WIDGET(l), GTK_STATE_FLAG_PRELIGHT);
 }
 
-static void _lib_viewswitcher_leave_notify_callback(GtkWidget *w, GdkEventCrossing *e, gpointer user_data)
+static void _lib_viewswitcher_view_cannot_change_callback(gpointer instance, dt_view_t *old_view,
+                                                          dt_view_t *new_view, gpointer user_data)
 {
-  GtkLabel *l = (GtkLabel *)user_data;
+  dt_lib_module_t *self = (dt_lib_module_t *)user_data;
+  dt_lib_viewswitcher_t *d = (dt_lib_viewswitcher_t *)self->data;
 
-  /* if not active view lets set default */
-  if(strcmp(g_object_get_data(G_OBJECT(w), "view-label"), dt_view_manager_name(darktable.view_manager)))
-  {
-    gtk_widget_set_state_flags(GTK_WIDGET(l), GTK_STATE_FLAG_NORMAL, TRUE);
-  }
+  g_signal_handlers_block_by_func(d->dropdown, _dropdown_changed, d);
+  gtk_combo_box_set_active(GTK_COMBO_BOX(d->dropdown), 0);
+  gtk_widget_set_state_flags(d->dropdown, GTK_STATE_FLAG_SELECTED, FALSE);
+  g_signal_handlers_unblock_by_func(d->dropdown, _dropdown_changed, d);
 }
 
 static void _lib_viewswitcher_view_changed_callback(gpointer instance, dt_view_t *old_view,
@@ -260,8 +267,8 @@ static GtkWidget *_lib_viewswitcher_create_label(dt_view_t *view)
   /* set enter/leave notify events and connect signals */
   gtk_widget_add_events(GTK_WIDGET(eb), GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
 
-  g_signal_connect(G_OBJECT(eb), "enter-notify-event", G_CALLBACK(_lib_viewswitcher_enter_notify_callback), b);
-  g_signal_connect(G_OBJECT(eb), "leave-notify-event", G_CALLBACK(_lib_viewswitcher_leave_notify_callback), b);
+  g_signal_connect(G_OBJECT(eb), "enter-notify-event", G_CALLBACK(_lib_viewswitcher_enter_leave_notify_callback), b);
+  g_signal_connect(G_OBJECT(eb), "leave-notify-event", G_CALLBACK(_lib_viewswitcher_enter_leave_notify_callback), b);
 
   return eb;
 }

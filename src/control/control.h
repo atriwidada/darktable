@@ -1,7 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2009--2010 johannes hanika.
-    copyright (c) 2011 henrik andersson.
+    Copyright (C) 2009-2021 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -21,6 +20,7 @@
 
 #include "common/darktable.h"
 #include "common/dtpthread.h"
+#include "common/action.h"
 #include "control/settings.h"
 
 #include <gtk/gtk.h>
@@ -38,9 +38,6 @@
 #include <shobjidl.h>
 #endif
 
-// A mask to strip out the Ctrl, Shift, and Alt mod keys for shortcuts
-#define KEY_STATE_MASK (GDK_CONTROL_MASK | GDK_SHIFT_MASK | GDK_MOD1_MASK)
-
 struct dt_lib_backgroundjob_element_t;
 
 typedef GdkCursorType dt_cursor_t;
@@ -53,13 +50,16 @@ void dt_control_button_released(double x, double y, int which, uint32_t state);
 void dt_control_mouse_moved(double x, double y, double pressure, int which);
 void dt_control_mouse_leave();
 void dt_control_mouse_enter();
-int dt_control_key_pressed(guint key, guint state);
-int dt_control_key_released(guint key, guint state);
 int dt_control_key_pressed_override(guint key, guint state);
 gboolean dt_control_configure(GtkWidget *da, GdkEventConfigure *event, gpointer user_data);
 void dt_control_log(const char *msg, ...) __attribute__((format(printf, 1, 2)));
+void dt_toast_log(const char *msg, ...) __attribute__((format(printf, 1, 2)));
+void dt_toast_markup_log(const char *msg, ...) __attribute__((format(printf, 1, 2)));
 void dt_control_log_busy_enter();
+void dt_control_toast_busy_enter();
 void dt_control_log_busy_leave();
+void dt_control_toast_busy_leave();
+void dt_control_draw_busy_msg(cairo_t *cr, int width, int height);
 // disable the possibility to change the cursor shape with dt_control_change_cursor
 void dt_control_forbid_change_cursor();
 // enable the possibility to change the cursor shape with dt_control_change_cursor
@@ -92,6 +92,16 @@ void dt_control_queue_redraw_widget(GtkWidget *widget);
  */
 void dt_control_navigation_redraw();
 
+/** \brief request redraw of the log widget.
+    This redraws the message label.
+ */
+void dt_control_log_redraw();
+
+/** \brief request redraw of the toast widget.
+    This redraws the message label.
+ */
+void dt_control_toast_redraw();
+
 void dt_ctl_switch_mode();
 void dt_ctl_switch_mode_to(const char *mode);
 void dt_ctl_switch_mode_to_by_view(const dt_view_t *view);
@@ -101,26 +111,12 @@ struct dt_control_t;
 /** sets the hinter message */
 void dt_control_hinter_message(const struct dt_control_t *s, const char *message);
 
-/** turn the use of key accelerators on */
-void dt_control_key_accelerators_on(struct dt_control_t *s);
-/** turn the use of key accelerators on */
-void dt_control_key_accelerators_off(struct dt_control_t *s);
-
-int dt_control_is_key_accelerators_on(struct dt_control_t *s);
-
-// All the accelerator keys for the key_pressed style shortcuts
-typedef struct dt_control_accels_t
-{
-  GtkAccelKey filmstrip_forward, filmstrip_back, lighttable_up, lighttable_down, lighttable_right, lighttable_left,
-      lighttable_center, lighttable_preview, lighttable_preview_display_focus, lighttable_preview_sticky,
-      lighttable_preview_sticky_focus, lighttable_timeline, lighttable_preview_zoom_100,
-      lighttable_preview_zoom_fit, global_focus_peaking, global_sideborders, global_header, global_accels_window, darkroom_preview,
-      slideshow_start, global_zoom_in, global_zoom_out, darkroom_skip_mouse_events, darkroom_search_modules_focus;
-} dt_control_accels_t;
-
 #define DT_CTL_LOG_SIZE 10
-#define DT_CTL_LOG_MSG_SIZE 200
+#define DT_CTL_LOG_MSG_SIZE 1000
 #define DT_CTL_LOG_TIMEOUT 5000
+#define DT_CTL_TOAST_SIZE 10
+#define DT_CTL_TOAST_MSG_SIZE 300
+#define DT_CTL_TOAST_TIMEOUT 1500
 /**
  * this manages everything time-consuming.
  * distributes the jobs on all processors,
@@ -128,20 +124,18 @@ typedef struct dt_control_accels_t
  */
 typedef struct dt_control_t
 {
-  // Keyboard accelerator groups
-  GtkAccelGroup *accelerators;
+  gboolean accel_initialising;
 
-  // Accelerator group path lists
-  GSList *accelerator_list;
-  GSList *dynamic_accelerator_list;
-  GSList *dynamic_accelerator_valid;
+  dt_action_t *actions, actions_global, actions_views, actions_thumb, actions_libs, actions_iops, actions_blend, actions_lua, actions_fallbacks, *actions_modifiers;
 
-  // Cached accelerator keys for key_pressed shortcuts
-  dt_control_accels_t accels;
-
-  // Accel remapping data
-  gchar *accel_remap_str;
-  GtkTreePath *accel_remap_path;
+  GHashTable *widgets, *combo_introspection, *combo_list;
+  GSequence *shortcuts;
+  gboolean enable_fallbacks;
+  GtkWidget *mapping_widget;
+  gboolean confirm_mapping;
+  dt_action_element_t element;
+  GPtrArray *widget_definitions;
+  GSList *input_drivers;
 
   char vimkey[256];
   int vimkey_cnt;
@@ -169,10 +163,16 @@ typedef struct dt_control_t
   int log_busy;
   dt_pthread_mutex_t log_mutex;
 
+  // toast log
+  int toast_pos, toast_ack;
+  char toast_message[DT_CTL_TOAST_SIZE][DT_CTL_TOAST_MSG_SIZE];
+  guint toast_message_timeout_id;
+  int toast_busy;
+  dt_pthread_mutex_t toast_mutex;
+
   // gui settings
   dt_pthread_mutex_t global_mutex, image_mutex;
   double last_expose_time;
-  int key_accelerators_on;
 
   // job management
   int32_t running;
@@ -180,7 +180,7 @@ typedef struct dt_control_t
   dt_pthread_mutex_t queue_mutex, cond_mutex, run_mutex;
   pthread_cond_t cond;
   int32_t num_threads;
-  pthread_t *thread, kick_on_workers_thread;
+  pthread_t *thread, kick_on_workers_thread, update_gphoto_thread;
   dt_job_t **job;
 
   GList *queues[DT_JOB_QUEUE_MAX];

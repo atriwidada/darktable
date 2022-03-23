@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2016-2018 Roman Lebedev.
+    Copyright (C) 2016-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@
 #define DT_SUPPORTED_X86 0
 #endif
 
-#if defined(__aarch64__) && defined(__ARM_64BIT_STATE) && defined(__ARM_ARCH) && defined(__ARM_ARCH_8A)
+#if defined(__aarch64__) && (defined(__ARM_64BIT_STATE) && defined(__ARM_ARCH) && defined(__ARM_ARCH_8A) || defined(__APPLE__))
 #define DT_SUPPORTED_ARMv8A 1
 #else
 #define DT_SUPPORTED_ARMv8A 0

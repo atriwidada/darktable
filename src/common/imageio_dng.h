@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2011 johannes hanika.
+    Copyright (C) 2011-2022 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -20,12 +20,13 @@
 
 // writes buffers as digital negative (dng) raw images
 
-#include "common/darktable.h"
-#include "common/exif.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "common/darktable.h"
+#include "common/exif.h"
 
 
 #define II 1
@@ -75,13 +76,19 @@ static inline void dt_imageio_dng_write_tiff_header(
     FILE *fp, uint32_t xs, uint32_t ys, float Tv, float Av,
     float f, float iso, uint32_t filter,
     const uint8_t xtrans[6][6],
-    const float whitelevel)
+    const float whitelevel,
+    const dt_aligned_pixel_t wb_coeffs,
+    const float adobe_XYZ_to_CAM[4][3])
 {
   const uint32_t channels = 1;
   uint8_t *b /*, *offs1, *offs2*/;
   // uint32_t exif_offs;
   uint8_t buf[1024];
   uint8_t cnt = 0;
+
+  // this matrix is generic for XYZ->sRGB / D65
+  int m[9] = { 3240454, -1537138, -498531, -969266, 1876010, 41556, 55643, -204025, 1057225 };
+  int den = 1000000;
 
   memset(buf, 0, sizeof(buf));
   /* TIFF file header.  */
@@ -151,11 +158,11 @@ static inline void dt_imageio_dng_write_tiff_header(
   } white;
   white.f = whitelevel;
   b = dt_imageio_dng_make_tag(50717, LONG, 1, white.u, b, &cnt); // WhiteLevel in float, actually.
-  b = dt_imageio_dng_make_tag(50778, SHORT, 1, 21 << 16, b, &cnt); // CalibrationIlluminant1
   b = dt_imageio_dng_make_tag(50721, SRATIONAL, 9, 480, b, &cnt); // ColorMatrix1 (XYZ->native cam)
-
-  // b = dt_imageio_dng_make_tag(50728, RATIONAL, 3, 512, b, &cnt); // AsShotNeutral
+  b = dt_imageio_dng_make_tag(50728, RATIONAL, 3, 556, b, &cnt); // AsShotNeutral
   // b = dt_imageio_dng_make_tag(50729, RATIONAL, 2, 512, b, &cnt); // AsShotWhiteXY
+  b = dt_imageio_dng_make_tag(50778, SHORT, 1, 21 << 16, b, &cnt); // CalibrationIlluminant1
+
   b = dt_imageio_dng_make_tag(0, 0, 0, 0, b, &cnt); /* Next IFD.  */
   buf[11] = cnt - 1; // write number of directory entries of this ifd
 
@@ -163,61 +170,33 @@ static inline void dt_imageio_dng_write_tiff_header(
   // printf("offset: %d\n", b - buf); // find out where we're writing data
   // apparently this doesn't need byteswap:
   memcpy(buf+400, xtrans, sizeof(uint8_t)*36);
-  // this matrix is generic for XYZ->sRGB / D65
-  int m[9] = { 3240454, -1537138, -498531, -969266, 1876010, 41556, 55643, -204025, 1057225 };
+
+  // ColorMatrix1 try to get camera matrix else m[k] like before
+  if(!isnan(adobe_XYZ_to_CAM[0][0]))
+  {
+    for(int k= 0; k < 3; k++)
+      for(int i= 0; i < 3; i++)
+        m[k*3+i] = roundf(adobe_XYZ_to_CAM[k][i] * ADOBE_COEFF_FACTOR);
+    den = ADOBE_COEFF_FACTOR;
+  }
+
   for(int k = 0; k < 9; k++)
   {
     dt_imageio_dng_write_buf(buf, 480+k*8, m[k]);
-    dt_imageio_dng_write_buf(buf, 484+k*8, 1000000);
+    dt_imageio_dng_write_buf(buf, 484+k*8, den);
   }
 
-#if 0
-  // mostly garbage below, but i'm too lazy to clean it up:
-  int32_t num, den;
-  // ColorMatrix1
-  float m[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-  // colorspace_get_xyz_to_cam(m);
-  for(int k = 0; k < 9; k++)
+  // TAG AsShotNeutral: for rawspeed Dngdecoder camera white balance
+  den = 1000000;
+  for(int k = 0; k < 3; k++)
   {
-    dt_imageio_dng_convert_rational(m[3 * (k % 3) + k / 3], &num, &den);
-    dt_imageio_dng_write_buf(buf, 328 + 8 * k, num);
-    dt_imageio_dng_write_buf(buf, 328 + 8 * k + 4, den);
+    const float coeff = roundf(((float)den * wb_coeffs[1]) / wb_coeffs[k]);
+    dt_imageio_dng_write_buf(buf, 556+k*8, (int)coeff);
+    dt_imageio_dng_write_buf(buf, 560+k*8, den);
   }
-  // for(int k=332;k<400;k+=8) dt_imageio_dng_write_buf(buf, k, 1); // den
-  // dt_imageio_dng_write_buf(buf, 328, 1);// color matrix1: identity
-  // dt_imageio_dng_write_buf(buf, 360, 1);
-  // dt_imageio_dng_write_buf(buf, 392, 1);
-  dt_imageio_dng_convert_rational(Tv, &num, &den);
-  dt_imageio_dng_write_buf(buf, 400, num); // exposure time
-  dt_imageio_dng_write_buf(buf, 404, den);
-  dt_imageio_dng_convert_rational(Av, &num, &den);
-  dt_imageio_dng_write_buf(buf, 408, num); // fnumber
-  dt_imageio_dng_write_buf(buf, 412, den);
-  dt_imageio_dng_convert_rational(f, &num, &den);
-  dt_imageio_dng_write_buf(buf, 416, num); // focal length
-  dt_imageio_dng_write_buf(buf, 420, den);
-  strncpy((char *)buf + 428, "2008:07:15 13:37:00\0", 20); // DateTime
-  strncpy((char *)buf + 484, "corona-6\0", 9);
-  strncpy((char *)buf + 494, "hanatos\0", 8);
-
-  // AsShotNeutral
-  // dt_imageio_dng_convert_rational(0.333, &num, &den);
-  // for(int k=0;k<3;k++)
-  // {
-  //   dt_imageio_dng_write_buf(buf, 518+8*k,   num);
-  //   dt_imageio_dng_write_buf(buf, 518+8*k+4, den);
-  // }
-  // AsShotWhiteXY
-  dt_imageio_dng_convert_rational(0.3333, &num, &den);
-  dt_imageio_dng_write_buf(buf, 512, num);
-  dt_imageio_dng_write_buf(buf, 516, den);
-  dt_imageio_dng_convert_rational(0.333, &num, &den);
-  dt_imageio_dng_write_buf(buf, 520, num);
-  dt_imageio_dng_write_buf(buf, 524, den);
-#endif
 
   // dt_imageio_dng_write_buf(buf, offs2-buf, 584);
-  int written = fwrite(buf, 1, 584, fp);
+  const int written = fwrite(buf, 1, 584, fp);
   if(written != 584) fprintf(stderr, "[dng_write_header] failed to write image header!\n");
 }
 
@@ -225,14 +204,16 @@ static inline void dt_imageio_write_dng(
     const char *filename, const float *const pixel, const int wd,
     const int ht, void *exif, const int exif_len, const uint32_t filter,
     const uint8_t xtrans[6][6],
-    const float whitelevel)
+    const float whitelevel,
+    const dt_aligned_pixel_t wb_coeffs,
+    const float adobe_XYZ_to_CAM[4][3])
 {
   FILE *f = g_fopen(filename, "wb");
-  int k = 0;
   if(f)
   {
-    dt_imageio_dng_write_tiff_header(f, wd, ht, 1.0f / 100.0f, 1.0f / 4.0f, 50.0f, 100.0f, filter, xtrans, whitelevel);
-    k = fwrite(pixel, sizeof(float), wd * ht, f);
+    dt_imageio_dng_write_tiff_header(f, wd, ht, 1.0f / 100.0f, 1.0f / 4.0f, 50.0f, 100.0f,
+                                     filter, xtrans, whitelevel, wb_coeffs, adobe_XYZ_to_CAM);
+    const int k = fwrite(pixel, sizeof(float), (size_t)wd * ht, f);
     if(k != wd * ht) fprintf(stderr, "[dng_write] Error writing image data to %s\n", filename);
     fclose(f);
     if(exif) dt_exif_write_blob(exif, exif_len, filename, 0);

@@ -27,6 +27,37 @@ macro(_detach_debuginfo target dest)
     set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_MAKE_CLEAN_FILES $<TARGET_FILE_NAME:${target}>.dbg)
 endmacro()
 
+
+#-------------------------------------------------------------------------------
+# _copy_required_library(<target> <library>)
+#
+# Helper function to copy required library (specified by target) alongside the
+# target binary.
+#
+# This is required as Win doesn't have a RPATH
+#-------------------------------------------------------------------------------
+function(_copy_required_library target library)
+  message( STATUS "WIN32: Adding post-build step to copy required lib alongside target binary")
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${library}> $<TARGET_FILE_DIR:${target}>
+  )
+endfunction()
+
+
+#-------------------------------------------------------------------------------
+# _install_translations(<catalog> <src_localedir>)
+#
+# Helper macro to install all available translations for a given catalog.
+#-------------------------------------------------------------------------------
+macro(_install_translations catalog src_localedir)
+  file(GLOB MO_FILES RELATIVE "${src_localedir}" "${src_localedir}/*/LC_MESSAGES/${catalog}.mo")
+  foreach(MO ${MO_FILES})
+    get_filename_component(MO_TARGET_DIR "${MO}" DIRECTORY)
+    install(FILES "${src_localedir}/${MO}" DESTINATION "share/locale/${MO_TARGET_DIR}" COMPONENT DTApplication)
+  endforeach()
+endmacro()
+
+
 function(InstallDependencyFiles)
 
 if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
@@ -50,9 +81,6 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
     ${MINGW_PATH}/gdbus.exe
   #LZO2
     ${MINGW_PATH}/liblzo*.dll
-  #OPENEXR
-    ${MINGW_PATH}/libIexMath*.dll
-    ${MINGW_PATH}/libIlmImfUtil*.dll
   #C-ARES
     ${MINGW_PATH}/libcares*.dll
   #LIBMETALINK
@@ -67,15 +95,6 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
     ${MINGW_PATH}/libminizip*.dll
   #TIFF
     ${MINGW_PATH}/libtiffxx*.dll
-  #OPENJPEG
-    ${MINGW_PATH}/libopenjp3d*.dll
-    ${MINGW_PATH}/libopenjpip*.dll
-    ${MINGW_PATH}/libopenjpwl*.dll
-    ${MINGW_PATH}/libopenmj2*.dll
-  #GRAPHICKSMAGICK
-    ${MINGW_PATH}/libltdl*.dll
-    ${MINGW_PATH}/libGraphicsMagick++*.dll
-    ${MINGW_PATH}/libGraphicsMagickWand*.dll
   #GETTEXT
     ${MINGW_PATH}/libasprintf*.dll
     ${MINGW_PATH}/libgettextlib*.dll
@@ -102,20 +121,71 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
     ${MINGW_PATH}/libpcre32*.dll
     ${MINGW_PATH}/libpcrecpp*.dll
     ${MINGW_PATH}/libpcreposix*.dll
-  #LIBWEBP
-    ${MINGW_PATH}/libwebpdecoder*.dll
-    ${MINGW_PATH}/libwebpdemux*.dll
-    #${MINGW_PATH}/libwebpextras*.dll
-    ${MINGW_PATH}/libwebpmux*.dll
   #GNUTLS
     ${MINGW_PATH}/libgnutlsxx*.dll
   #GMP
     ${MINGW_PATH}/libgmpxx*.dll
   #LIBUSB1
     ${MINGW_PATH}/libusb*.dll
+  #OPENSSL
+    ${MINGW_PATH}/libcrypto*.dll
+    ${MINGW_PATH}/libssl*.dll
     )
 
-  install(PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION bin COMPONENT DTApplication)
+  if(OpenEXR_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #OPENEXR
+      ${MINGW_PATH}/libIexMath*.dll
+      ${MINGW_PATH}/libIlmImfUtil*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif()
+
+  if(OpenJPEG_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #OPENJPEG
+      ${MINGW_PATH}/libopenjp3d*.dll
+      ${MINGW_PATH}/libopenjpip*.dll
+      ${MINGW_PATH}/libopenjpwl*.dll
+      ${MINGW_PATH}/libopenmj2*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif()
+
+  if(GraphicsMagick_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #GRAPHICKSMAGICK
+      ${MINGW_PATH}/libltdl*.dll
+      ${MINGW_PATH}/libGraphicsMagick++*.dll
+      ${MINGW_PATH}/libGraphicsMagickWand*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif()
+
+  # workaround for msys2 gmic 2.9.0-3. Should be reviewed when gmic 2.9.3 is available
+  if(GMIC_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #GMIC
+      ${MINGW_PATH}/libopencv_core*.dll
+      ${MINGW_PATH}/libopencv_videoio*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif()
+
+  if(WebP_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #LIBWEBP
+      ${MINGW_PATH}/libwebpdecoder*.dll
+      ${MINGW_PATH}/libwebpdemux*.dll
+      #${MINGW_PATH}/libwebpextras*.dll
+      ${MINGW_PATH}/libwebpmux*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif()
+
+  # Add GLib and GTK translations
+  _install_translations(glib20 ${MINGW_PATH}/../share/locale)
+  _install_translations(gtk30 ${MINGW_PATH}/../share/locale)
 
   # TODO: Add auxiliary files for openssl?
 
@@ -151,31 +221,45 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
       DESTINATION share/libthai/
       COMPONENT DTApplication)
 
-  # Add libgphoto2 files
-  install(DIRECTORY
-      "${MINGW_PATH}/../lib/libgphoto2"
-      DESTINATION lib/
-      COMPONENT DTApplication
-      PATTERN "*.a" EXCLUDE)
+  # Add libgphoto2 files and dependencies
+  if(Gphoto2_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      ${MINGW_PATH}/imagequant.dll
+      ${MINGW_PATH}/libexif*.dll
+      ${MINGW_PATH}/libgd.dll
+      ${MINGW_PATH}/libusb*.dll
+      ${MINGW_PATH}/libXpm-noX*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
 
-  install(DIRECTORY
-      "${MINGW_PATH}/../lib/libgphoto2_port"
-      DESTINATION lib/
-      COMPONENT DTApplication
-      PATTERN "*.a" EXCLUDE
-      PATTERN "usb.dll" EXCLUDE)
+    install(DIRECTORY
+        "${MINGW_PATH}/../lib/libgphoto2"
+        DESTINATION lib/
+        COMPONENT DTApplication
+        PATTERN "*.a" EXCLUDE)
+    _install_translations(libgphoto2-6 ${MINGW_PATH}/../share/locale)
+
+    install(DIRECTORY
+        "${MINGW_PATH}/../lib/libgphoto2_port"
+        DESTINATION lib/
+        COMPONENT DTApplication
+        PATTERN "*.a" EXCLUDE
+        PATTERN "usb.dll" EXCLUDE)
+  endif()
 
   # Add GraphicsMagick libraries
-  install(DIRECTORY
-      "${MINGW_PATH}/../lib/GraphicsMagick-${GraphicsMagick_PKGCONF_VERSION}/modules-Q8/coders"
-      DESTINATION lib/GraphicsMagick-${GraphicsMagick_PKGCONF_VERSION}/modules-Q8/
-      COMPONENT DTApplication
-      FILES_MATCHING PATTERN "*"
-      PATTERN "*.a" EXCLUDE
-      PATTERN "*.la" EXCLUDE)
+  if(GraphicsMagick_FOUND)
+    install(DIRECTORY
+        "${MINGW_PATH}/../lib/GraphicsMagick-${GraphicsMagick_PKGCONF_VERSION}/modules-Q8/coders"
+        DESTINATION lib/GraphicsMagick-${GraphicsMagick_PKGCONF_VERSION}/modules-Q8/
+        COMPONENT DTApplication
+        FILES_MATCHING PATTERN "*"
+        PATTERN "*.a" EXCLUDE
+        PATTERN "*.la" EXCLUDE)
+  endif()
 
   # Add lensfun libraries
-  if(LENSFUN_FOUND)
+  if(LensFun_FOUND)
     set(LENSFUN_DB_GLOBAL "${MINGW_PATH}/../share/lensfun/version_1")
     set(LENSFUN_DB_UPDATES "${MINGW_PATH}/../var/lib/lensfun-updates/version_1")
     set(LENSFUN_DB "${LENSFUN_DB_GLOBAL}")
@@ -191,21 +275,17 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
         "${LENSFUN_DB}"
         DESTINATION share/lensfun/
         COMPONENT DTApplication)
-  endif(LENSFUN_FOUND)
+  endif(LensFun_FOUND)
 
   # Add iso-codes
-  if(ISO_CODES_FOUND)
+  if(IsoCodes_FOUND)
     install(FILES
-        "${ISO_CODES_LOCATION}/iso_639-2.json"
+        "${IsoCodes_LOCATION}/iso_639-2.json"
         DESTINATION share/iso-codes/json/
         COMPONENT DTApplication
     )
-    file(GLOB ISO_CODES_MO_FILES RELATIVE "${ISO_CODES_LOCALEDIR}" "${ISO_CODES_LOCALEDIR}/*/LC_MESSAGES/iso_639.mo")
-    foreach(MO ${ISO_CODES_MO_FILES})
-      string(REPLACE "iso_639.mo" "" MO_TARGET_DIR "${MO}")
-      install(FILES "${ISO_CODES_LOCALEDIR}/${MO}" DESTINATION "share/locale/${MO_TARGET_DIR}" COMPONENT DTApplication)
-    endforeach()
-  endif(ISO_CODES_FOUND)
+    _install_translations(iso_639-2 ${IsoCodes_LOCALEDIR})
+  endif(IsoCodes_FOUND)
 
   # Add ca-cert for curl
   install(FILES
@@ -213,6 +293,28 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
       DESTINATION share/curl/
       RENAME curl-ca-bundle.crt
       COMPONENT DTApplication)
+
+  # Add libavif files
+  if(libavif_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #LIBAVIF
+      ${MINGW_PATH}/libavif*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif(libavif_FOUND)
+
+  # Add rsvg2 files
+  if(Rsvg2_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #RSVG2
+      ${MINGW_PATH}/librsvg*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif(Rsvg2_FOUND)
+
+  list(REMOVE_DUPLICATES CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+
+  install(PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION bin COMPONENT DTApplication)
 
 endif(WIN32 AND NOT BUILD_MSYS2_INSTALL)
 

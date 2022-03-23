@@ -1,6 +1,6 @@
 /*
    This file is part of darktable,
-   copyright (c) 2015 Jeremy Rosen
+   Copyright (C) 2015-2020 darktable developers.
 
    darktable is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -34,12 +34,10 @@ static void entry_init(lua_State* L)
 {
   lua_entry entry;
   luaA_to(L,lua_entry,&entry,1);
-  dt_gui_key_accel_block_on_focus_connect(GTK_WIDGET(entry->widget));
 }
 
 static void entry_cleanup(lua_State* L,lua_widget widget)
 {
-  dt_gui_key_accel_block_on_focus_disconnect(widget->widget);
 }
 
 
@@ -62,7 +60,7 @@ static int is_password_member(lua_State *L)
   luaA_to(L,lua_entry,&entry,1);
   if(lua_gettop(L) > 2) {
     const gboolean visibility = lua_toboolean(L,3);
-    gtk_entry_set_visibility(GTK_ENTRY(entry->widget),visibility);
+    gtk_entry_set_visibility(GTK_ENTRY(entry->widget),!visibility);
     return 0;
   }
   lua_pushboolean(L,gtk_entry_get_visibility(GTK_ENTRY(entry->widget)));

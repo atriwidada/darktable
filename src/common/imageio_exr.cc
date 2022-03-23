@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2010--2014 Henrik Andersson.
+    Copyright (C) 2010-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -100,11 +100,17 @@ dt_imageio_retval_t dt_imageio_open_exr(dt_image_t *img, const char *filename, d
     return DT_IMAGEIO_FILE_CORRUPTED;
   }
 
-  // read back exif data
-  const Imf::BlobAttribute *exif = header.findTypedAttribute<Imf::BlobAttribute>("exif");
-  // we append a jpg-compatible exif00 string, so get rid of that again:
-  if(exif && exif->value().size > 6)
-    dt_exif_read_from_blob(img, ((uint8_t *)(exif->value().data.get())) + 6, exif->value().size - 6);
+  if(!img->exif_inited)
+  {
+    // read back exif data
+    // if another software is able to update these exif data, the former test
+    // should be removed to take the potential changes in account (not done
+    // by normal import image flow)
+    const Imf::BlobAttribute *exif = header.findTypedAttribute<Imf::BlobAttribute>("exif");
+    // we append a jpg-compatible exif00 string, so get rid of that again:
+    if(exif && exif->value().size > 6)
+      dt_exif_read_from_blob(img, ((uint8_t *)(exif->value().data.get())) + 6, exif->value().size - 6);
+  }
 
   /* Get image width and height from displayWindow */
   dw = header.displayWindow();
@@ -123,7 +129,7 @@ dt_imageio_retval_t dt_imageio_open_exr(dt_image_t *img, const char *filename, d
   }
 
   // FIXME: is this really needed?
-  memset(buf, 0, 4 * img->width * img->height * sizeof(float));
+  memset(buf, 0, sizeof(float) * 4 * img->width * img->height);
 
   /* setup framebuffer */
   xstride = sizeof(float) * 4;
@@ -177,8 +183,13 @@ dt_imageio_retval_t dt_imageio_open_exr(dt_image_t *img, const char *filename, d
 
 
   /* cleanup and return... */
+  img->buf_dsc.filters = 0u;
+  img->flags &= ~DT_IMAGE_RAW;
+  img->flags &= ~DT_IMAGE_S_RAW;
+  img->flags &= ~DT_IMAGE_LDR;
   img->flags |= DT_IMAGE_HDR;
 
+  img->loader = LOADER_EXR;
   return DT_IMAGEIO_OK;
 }
 

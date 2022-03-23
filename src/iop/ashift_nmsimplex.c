@@ -1,6 +1,6 @@
 /*
   This file is part of darktable,
-  copyright (c) 2016 Ulrich Pegelow.
+  Copyright (C) 2016-2020 darktable developers.
 
   darktable is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -106,17 +106,17 @@ static int simplex(double (*objfunc)(double[], void *params), double start[], in
   /* dynamically allocate arrays */
 
   /* allocate the rows of the arrays */
-  v = (double **)malloc((n + 1) * sizeof(double *));
-  f = (double *)malloc((n + 1) * sizeof(double));
-  vr = (double *)malloc(n * sizeof(double));
-  ve = (double *)malloc(n * sizeof(double));
-  vc = (double *)malloc(n * sizeof(double));
-  vm = (double *)malloc(n * sizeof(double));
+  v = (double **)malloc(sizeof(double *) * (n + 1));
+  f = (double *)malloc(sizeof(double) * (n + 1));
+  vr = (double *)malloc(sizeof(double) * n);
+  ve = (double *)malloc(sizeof(double) * n);
+  vc = (double *)malloc(sizeof(double) * n);
+  vm = (double *)malloc(sizeof(double) * n);
 
   /* allocate the columns of the arrays */
   for(i = 0; i <= n; i++)
   {
-    v[i] = (double *)malloc(n * sizeof(double));
+    v[i] = (double *)malloc(sizeof(double) * n);
   }
 
   /* create the initial simplex */

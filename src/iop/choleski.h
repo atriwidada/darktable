@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    copyright (c) 2019 Aurélien Pierre.
+    Copyright (C) 2019-2020 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -23,6 +23,7 @@
 #include <time.h>
 
 #include "common/darktable.h"
+#include "common/imagebuf.h"
 #include "develop/imageop_math.h"
 
 /** Note :

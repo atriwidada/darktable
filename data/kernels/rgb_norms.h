@@ -1,6 +1,6 @@
 /*
  *    This file is part of darktable,
- *    copyright (c) 2019 philippe weyland
+ *    Copyright (C) 2019-2020 darktable developers.
  *
  *    darktable is free software: you can redistribute it and/or modify
  *    it under the terms of the GNU General Public License as published by
@@ -27,7 +27,7 @@
    DT_RGB_NORM_POWER = 6
  } dt_iop_rgb_norms_t;
 
-inline float
+static inline float
 dt_rgb_norm(const float4 in, const int norm, const int work_profile,
   constant dt_colorspaces_iccprofile_info_cl_t *profile_info, read_only image2d_t lut)
 {
