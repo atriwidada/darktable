@@ -21,6 +21,8 @@
 #include <gtk/gtk.h>
 #include <string.h>
 
+G_BEGIN_DECLS
+
 /** returns the users home directory */
 gchar *dt_loc_get_home_dir(const gchar *user);
 
@@ -55,6 +57,11 @@ void dt_loc_get_tmp_dir(char *tmpdir, size_t bufsize);
 void dt_loc_get_user_config_dir(char *configdir, size_t bufsize);
 void dt_loc_get_user_cache_dir(char *cachedir, size_t bufsize);
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+G_END_DECLS
+
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

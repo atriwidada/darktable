@@ -67,6 +67,7 @@ typedef struct dt_print_info_t
   dt_page_setup_t page;
   dt_paper_info_t paper;
   dt_medium_info_t medium;
+  int num_printers;  // the number of printers found
 } dt_print_info_t;
 
 // Asynchronous printer discovery, cb will be called for each printer found
@@ -92,7 +93,7 @@ GList *dt_get_media_type(const dt_printer_info_t *printer);
 dt_medium_info_t *dt_get_medium(GList *media, const char *name);
 
 // print filename using the printer and the page size and setup
-void dt_print_file(const int32_t imgid, const char *filename, const char *job_title, const dt_print_info_t *pinfo);
+void dt_print_file(const dt_imgid_t imgid, const char *filename, const char *job_title, const dt_print_info_t *pinfo);
 
 // given the page settings (media size and border) and the printer (hardware margins) returns the
 // page and printable area layout in the area_width and area_height (the area that dt allocate
@@ -106,6 +107,9 @@ void dt_get_print_layout(const dt_print_info_t *prt,
                          float *ax, float *ay, float *awidth, float *aheight,
                          gboolean *borderless);
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

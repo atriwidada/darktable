@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2021 darktable developers.
+    Copyright (C) 2011-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -40,10 +40,6 @@
 #include "iop/iop_api.h"
 #include <gtk/gtk.h>
 #include <inttypes.h>
-
-#if defined(__SSE__)
-#include <xmmintrin.h>
-#endif
 
 #define MAX_RADIUS 32
 
@@ -94,12 +90,14 @@ int default_group()
   return IOP_GROUP_EFFECT | IOP_GROUP_EFFECTS;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_RGB;
 }
 
-const char *description(struct dt_iop_module_t *self)
+const char **description(struct dt_iop_module_t *self)
 {
   return dt_iop_set_description(self, _("create a softened image using the Orton effect"),
                                       _("creative"),
@@ -113,7 +111,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
 {
   const dt_iop_soften_data_t *const d = (const dt_iop_soften_data_t *const)piece->data;
 
-  if (!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
+  if(!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
                                          ivoid, ovoid, roi_in, roi_out))
     return; // image has been copied through to output and module's trouble flag has been updated
 
@@ -125,12 +123,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
 
   const size_t npixels = (size_t)roi_out->width * roi_out->height;
 /* create overexpose image and then blur */
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(brightness, npixels, saturation) \
-  dt_omp_sharedconst(in, out) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < 4 * npixels; k += 4)
   {
     float h, s, l;
@@ -160,7 +153,6 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   dt_iop_soften_data_t *d = (dt_iop_soften_data_t *)piece->data;
   dt_iop_soften_global_data_t *gd = (dt_iop_soften_global_data_t *)self->global_data;
 
-  cl_int err = -999;
   cl_mem dev_tmp = NULL;
   cl_mem dev_m = NULL;
 
@@ -225,91 +217,55 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   size_t sizes[3];
   size_t local[3];
 
+  cl_int err = DT_OPENCL_SYSMEM_ALLOCATION;
   dev_tmp = dt_opencl_alloc_device(devid, width, height, sizeof(float) * 4);
   if(dev_tmp == NULL) goto error;
 
   dev_m = dt_opencl_copy_host_to_device_constant(devid, mat_size, mat);
   if(dev_m == NULL) goto error;
 
-  /* overexpose image */
-  sizes[0] = ROUNDUPWD(width);
-  sizes[1] = ROUNDUPHT(height);
-  sizes[2] = 1;
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_overexposed, 0, sizeof(cl_mem), (void *)&dev_in);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_overexposed, 1, sizeof(cl_mem), (void *)&dev_tmp);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_overexposed, 2, sizeof(int), (void *)&width);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_overexposed, 3, sizeof(int), (void *)&height);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_overexposed, 4, sizeof(float), (void *)&saturation);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_overexposed, 5, sizeof(float), (void *)&brightness);
-  err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_soften_overexposed, sizes);
+  err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_soften_overexposed, width, height,
+    CLARG(dev_in), CLARG(dev_tmp),
+    CLARG(width), CLARG(height), CLARG(saturation), CLARG(brightness));
   if(err != CL_SUCCESS) goto error;
 
   if(rad != 0)
   {
     /* horizontal blur */
     sizes[0] = bwidth;
-    sizes[1] = ROUNDUPHT(height);
+    sizes[1] = ROUNDUPDHT(height, devid);
     sizes[2] = 1;
     local[0] = hblocksize;
     local[1] = 1;
     local[2] = 1;
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_hblur, 0, sizeof(cl_mem), (void *)&dev_tmp);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_hblur, 1, sizeof(cl_mem), (void *)&dev_out);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_hblur, 2, sizeof(cl_mem), (void *)&dev_m);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_hblur, 3, sizeof(int), (void *)&wdh);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_hblur, 4, sizeof(int), (void *)&width);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_hblur, 5, sizeof(int), (void *)&height);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_hblur, 6, sizeof(int), (void *)&hblocksize);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_hblur, 7, (hblocksize + 2 * wdh) * 4 * sizeof(float),
-                             NULL);
+    dt_opencl_set_kernel_args(devid, gd->kernel_soften_hblur, 0, CLARG(dev_tmp), CLARG(dev_out), CLARG(dev_m),
+      CLARG(wdh), CLARG(width), CLARG(height), CLARG(hblocksize), CLLOCAL((hblocksize + 2 * wdh) * 4 * sizeof(float)));
     err = dt_opencl_enqueue_kernel_2d_with_local(devid, gd->kernel_soften_hblur, sizes, local);
     if(err != CL_SUCCESS) goto error;
 
 
     /* vertical blur */
-    sizes[0] = ROUNDUPWD(width);
+    sizes[0] = ROUNDUPDWD(width, devid);
     sizes[1] = bheight;
     sizes[2] = 1;
     local[0] = 1;
     local[1] = vblocksize;
     local[2] = 1;
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_vblur, 0, sizeof(cl_mem), (void *)&dev_out);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_vblur, 1, sizeof(cl_mem), (void *)&dev_tmp);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_vblur, 2, sizeof(cl_mem), (void *)&dev_m);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_vblur, 3, sizeof(int), (void *)&wdh);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_vblur, 4, sizeof(int), (void *)&width);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_vblur, 5, sizeof(int), (void *)&height);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_vblur, 6, sizeof(int), (void *)&vblocksize);
-    dt_opencl_set_kernel_arg(devid, gd->kernel_soften_vblur, 7, (vblocksize + 2 * wdh) * 4 * sizeof(float),
-                             NULL);
+    dt_opencl_set_kernel_args(devid, gd->kernel_soften_vblur, 0, CLARG(dev_out), CLARG(dev_tmp), CLARG(dev_m),
+      CLARG(wdh), CLARG(width), CLARG(height), CLARG(vblocksize), CLLOCAL((vblocksize + 2 * wdh) * 4 * sizeof(float)));
     err = dt_opencl_enqueue_kernel_2d_with_local(devid, gd->kernel_soften_vblur, sizes, local);
     if(err != CL_SUCCESS) goto error;
   }
 
-  /* mixing tmp and in -> out */
-  sizes[0] = ROUNDUPWD(width);
-  sizes[1] = ROUNDUPHT(height);
-  sizes[2] = 1;
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_mix, 0, sizeof(cl_mem), (void *)&dev_in);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_mix, 1, sizeof(cl_mem), (void *)&dev_tmp);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_mix, 2, sizeof(cl_mem), (void *)&dev_out);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_mix, 3, sizeof(int), (void *)&width);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_mix, 4, sizeof(int), (void *)&height);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_soften_mix, 5, sizeof(float), (void *)&amount);
-  err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_soften_mix, sizes);
-  if(err != CL_SUCCESS) goto error;
-
-  dt_opencl_release_mem_object(dev_m);
-  dt_opencl_release_mem_object(dev_tmp);
-  free(mat);
-  return TRUE;
+  err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_soften_mix, width, height,
+    CLARG(dev_in), CLARG(dev_tmp), CLARG(dev_out),
+    CLARG(width), CLARG(height), CLARG(amount));
 
 error:
   dt_opencl_release_mem_object(dev_m);
   dt_opencl_release_mem_object(dev_tmp);
   free(mat);
-  dt_print(DT_DEBUG_OPENCL, "[opencl_soften] couldn't enqueue kernel! %d\n", err);
-  return FALSE;
+  return err;
 }
 #endif
 
@@ -409,6 +365,9 @@ void gui_init(struct dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->amount, _("the mix of effect"));
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

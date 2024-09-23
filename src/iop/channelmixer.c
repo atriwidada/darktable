@@ -1,6 +1,6 @@
 /*
   This file is part of darktable,
-  Copyright (C) 2010-2021 darktable developers.
+  Copyright (C) 2010-2023 darktable developers.
 
   darktable is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -131,7 +131,7 @@ const char *deprecated_msg()
   return _("this module is deprecated. please use the color calibration module instead.");
 }
 
-const char *description(struct dt_iop_module_t *self)
+const char **description(struct dt_iop_module_t *self)
 {
   return dt_iop_set_description(self, _("perform color space corrections\n"
                                         "such as white balance, channels mixing\n"
@@ -153,15 +153,33 @@ int default_group()
   return IOP_GROUP_COLOR | IOP_GROUP_GRADING;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_RGB;
 }
 
-int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version, void *new_params,
-                  const int new_version)
+int legacy_params(dt_iop_module_t *self,
+                  const void *const old_params,
+                  const int old_version,
+                  void **new_params,
+                  int32_t *new_params_size,
+                  int *new_version)
 {
-  if(old_version == 1 && new_version == 2)
+  typedef struct dt_iop_channelmixer_params_v2_t
+  {
+    /** amount of red to mix value */
+    float red[CHANNEL_SIZE]; // $MIN: -1.0 $MAX: 1.0
+    /** amount of green to mix value */
+    float green[CHANNEL_SIZE]; // $MIN: -1.0 $MAX: 1.0
+    /** amount of blue to mix value */
+    float blue[CHANNEL_SIZE]; // $MIN: -1.0 $MAX: 1.0
+    /** algorithm version */
+    _channelmixer_algorithm_t algorithm_version;
+  } dt_iop_channelmixer_params_v2_t;
+
+  if(old_version == 1)
   {
     typedef struct dt_iop_channelmixer_params_v1_t
     {
@@ -170,36 +188,44 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
       float blue[7];
     } dt_iop_channelmixer_params_v1_t;
 
-    const dt_iop_channelmixer_params_v1_t *old = (dt_iop_channelmixer_params_v1_t *)old_params;
-    dt_iop_channelmixer_params_t *new = (dt_iop_channelmixer_params_t *)new_params;
-    dt_iop_channelmixer_params_t *defaults = (dt_iop_channelmixer_params_t *)self->default_params;
+    const dt_iop_channelmixer_params_v1_t *o =
+      (dt_iop_channelmixer_params_v1_t *)old_params;
+    dt_iop_channelmixer_params_v2_t *n =
+      (dt_iop_channelmixer_params_v2_t *)malloc(sizeof(dt_iop_channelmixer_params_v2_t));
 
-    *new = *defaults; // start with a fresh copy of default parameters
-    new->algorithm_version = CHANNEL_MIXER_VERSION_1;
+    memset(n, 0, sizeof(dt_iop_channelmixer_params_v2_t));
+
+    n->algorithm_version = CHANNEL_MIXER_VERSION_1;
 
     // copy gray mixing parameters
-    new->red[CHANNEL_GRAY] = old->red[6];
-    new->green[CHANNEL_GRAY] = old->green[6];
-    new->blue[CHANNEL_GRAY] = old->blue[6];
+    n->red[CHANNEL_GRAY] = o->red[6];
+    n->green[CHANNEL_GRAY] = o->green[6];
+    n->blue[CHANNEL_GRAY] = o->blue[6];
 
     // version 1 does not use RGB mixing when gray is enabled
-    if(new->red[CHANNEL_GRAY] == 0.0f && new->green[CHANNEL_GRAY] == 0.0f && new->blue[CHANNEL_GRAY] == 0.0f)
+    if(n->red[CHANNEL_GRAY] == 0.0f
+       && n->green[CHANNEL_GRAY] == 0.0f
+       && n->blue[CHANNEL_GRAY] == 0.0f)
     {
       for(int i = 0; i < 3; i++)
       {
-        new->red[CHANNEL_RED + i] = old->red[3 + i];
-        new->green[CHANNEL_RED + i] = old->green[3 + i];
-        new->blue[CHANNEL_RED + i] = old->blue[3 + i];
+        n->red[CHANNEL_RED + i] = o->red[3 + i];
+        n->green[CHANNEL_RED + i] = o->green[3 + i];
+        n->blue[CHANNEL_RED + i] = o->blue[3 + i];
       }
     }
 
     // copy HSL mixing parameters
     for(int i = 0; i < 3; i++)
     {
-      new->red[i] = old->red[i];
-      new->green[i] = old->green[i];
-      new->blue[i] = old->blue[i];
+      n->red[i] = o->red[i];
+      n->green[i] = o->green[i];
+      n->blue[i] = o->blue[i];
     }
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_channelmixer_params_v2_t);
+    *new_version = 2;
     return 0;
   }
   return 1;
@@ -214,11 +240,7 @@ static void process_hsl_v1(dt_dev_pixelpipe_iop_t *piece, const float *const res
   const int ch = piece->colors;
   const size_t pixel_count = (size_t)ch * roi_out->width * roi_out->height;
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(ch, pixel_count, hsl_matrix, rgb_matrix, in, out) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < pixel_count; k += ch)
   {
     float h, s, l, hmix, smix, lmix;
@@ -263,11 +285,7 @@ static void process_hsl_v2(dt_dev_pixelpipe_iop_t *piece, const float *const res
   const int ch = piece->colors;
   const size_t pixel_count = (size_t)ch * roi_out->width * roi_out->height;
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(ch, pixel_count, hsl_matrix, rgb_matrix, in, out) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < pixel_count; k += ch)
   {
     dt_aligned_pixel_t rgb = { in[k], in[k + 1], in[k + 2] };
@@ -316,11 +334,7 @@ static void process_rgb(dt_dev_pixelpipe_iop_t *piece, const float *const restri
   const int ch = piece->colors;
   const size_t pixel_count = (size_t)ch * roi_out->width * roi_out->height;
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(ch, pixel_count, rgb_matrix, in, out) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < pixel_count; k += ch)
   {
     for(int i = 0, j = 0; i < 3; i++, j += 3)
@@ -340,11 +354,7 @@ static void process_gray(dt_dev_pixelpipe_iop_t *piece, const float *const restr
   const int ch = piece->colors;
   const size_t pixel_count = (size_t)ch * roi_out->width * roi_out->height;
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(ch, pixel_count, rgb_matrix, in, out) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < pixel_count; k += ch)
   {
     float gray = fmaxf(rgb_matrix[0] * in[k + 0]
@@ -360,7 +370,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
              void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
   const dt_iop_channelmixer_data_t *data = (dt_iop_channelmixer_data_t *)piece->data;
-  switch (data->operation_mode)
+  switch(data->operation_mode)
   {
     case OPERATION_MODE_RGB:
       process_rgb(piece, (const float *const restrict)ivoid, (float *const restrict)ovoid, roi_out);
@@ -377,7 +387,6 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
     default:
       break;
   }
-  if(piece->pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
 }
 
 #ifdef HAVE_OPENCL
@@ -390,7 +399,7 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   cl_mem dev_hsl_matrix = NULL;
   cl_mem dev_rgb_matrix = NULL;
 
-  cl_int err = -999;
+  cl_int err = DT_OPENCL_DEFAULT_ERROR;
 
   const int devid = piece->pipe->devid;
   const int width = roi_in->width;
@@ -398,33 +407,20 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
 
   const _channelmixer_operation_mode_t operation_mode = data->operation_mode;
 
-  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };
 
   dev_hsl_matrix = dt_opencl_copy_host_to_device_constant(devid, sizeof(data->hsl_matrix), data->hsl_matrix);
   if(dev_hsl_matrix == NULL) goto error;
   dev_rgb_matrix = dt_opencl_copy_host_to_device_constant(devid, sizeof(data->rgb_matrix), data->rgb_matrix);
   if(dev_rgb_matrix == NULL) goto error;
 
-  dt_opencl_set_kernel_arg(devid, gd->kernel_channelmixer, 0, sizeof(cl_mem), (void *)&dev_in);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_channelmixer, 1, sizeof(cl_mem), (void *)&dev_out);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_channelmixer, 2, sizeof(int), (void *)&width);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_channelmixer, 3, sizeof(int), (void *)&height);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_channelmixer, 4, sizeof(int), (void *)&operation_mode);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_channelmixer, 5, sizeof(cl_mem), (void *)&dev_hsl_matrix);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_channelmixer, 6, sizeof(cl_mem), (void *)&dev_rgb_matrix);
-  err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_channelmixer, sizes);
-  if(err != CL_SUCCESS) goto error;
-
-  dt_opencl_release_mem_object(dev_hsl_matrix);
-  dt_opencl_release_mem_object(dev_rgb_matrix);
-
-  return TRUE;
+  err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_channelmixer, width, height,
+    CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(operation_mode), CLARG(dev_hsl_matrix),
+    CLARG(dev_rgb_matrix));
 
 error:
   dt_opencl_release_mem_object(dev_hsl_matrix);
   dt_opencl_release_mem_object(dev_rgb_matrix);
-  dt_print(DT_DEBUG_OPENCL, "[opencl_channelmixer] couldn't enqueue kernel! %d\n", err);
-  return FALSE;
+  return err;
 }
 #endif
 
@@ -612,7 +608,7 @@ void init(dt_iop_module_t *module)
 void gui_init(struct dt_iop_module_t *self)
 {
   dt_iop_channelmixer_gui_data_t *g = IOP_GUI_ALLOC(channelmixer);
-  dt_iop_channelmixer_params_t *p = (dt_iop_channelmixer_params_t *)self->default_params;
+  const dt_iop_channelmixer_params_t *const p = (dt_iop_channelmixer_params_t *)self->default_params;
 
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
@@ -774,6 +770,8 @@ void init_presets(dt_iop_module_so_t *self)
   dt_database_release_transaction(darktable.db);
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

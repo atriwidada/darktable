@@ -23,9 +23,6 @@ struct dt_import_session_t;
 struct dt_import_session_t *dt_import_session_new();
 void dt_import_session_destroy(struct dt_import_session_t *self);
 
-/** \brief Verify that we use current film and import images into it */
-gboolean dt_import_session_ready(struct dt_import_session_t *self);
-
 /** \brief add reference to specified import session */
 void dt_import_session_ref(struct dt_import_session_t *self);
 /** \brief remove reference to specified import session */
@@ -42,8 +39,8 @@ void dt_import_session_set_name(struct dt_import_session_t *self, const char *na
 */
 void dt_import_session_set_time(struct dt_import_session_t *self, const char *time);
 
-/** \brief set the timestamp for EXIF variables */
-void dt_import_session_set_exif_time(struct dt_import_session_t *self, const char *exif_time);
+/** \brief set the basic exif info for EXIF variables */
+void dt_import_session_set_exif_basic_info(struct dt_import_session_t *self, const dt_image_basic_exif_t *basic_exif);
 
 /** \brief set the original filename
     \remark This is used to expand $(FILE_X) variables. */
@@ -64,6 +61,8 @@ const char *dt_import_session_filename(struct dt_import_session_t *self, gboolea
 */
 const char *dt_import_session_path(struct dt_import_session_t *self, gboolean current);
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2012-2020 darktable developers.
+    Copyright (C) 2012-2023 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "gtkentry.h"
 #include "common/darktable.h"
 
@@ -177,7 +178,7 @@ const dt_gtkentry_completion_spec *dt_gtkentry_get_default_path_compl_list()
           { "VERSION.IF_MULTI", N_("$(VERSION.IF_MULTI) - same as $(VERSION) but null string if only one version exists") },
           { "VERSION.NAME", N_("$(VERSION.NAME) - version name from metadata") },
           { "JOBCODE", N_("$(JOBCODE) - job code for import") },
-          { "SEQUENCE", N_("$(SEQUENCE) - sequence number") },
+          { "SEQUENCE[4,1]", N_("$(SEQUENCE[n,m]) - sequence number, n: number of digits, m: start number") },
           { "WIDTH.MAX", N_("$(WIDTH.MAX) - maximum image export width") },
           { "WIDTH.SENSOR", N_("$(WIDTH.SENSOR) - image sensor width") },
           { "WIDTH.RAW", N_("$(WIDTH.RAW) - RAW image width") },
@@ -202,8 +203,8 @@ const dt_gtkentry_completion_spec *dt_gtkentry_get_default_path_compl_list()
           { "EXIF.YEAR", N_("$(EXIF.YEAR) - EXIF year") },
           { "EXIF.YEAR.SHORT", N_("$(EXIF.YEAR.SHORT) - EXIF year without century") },
           { "EXIF.MONTH", N_("$(EXIF.MONTH) - EXIF month") },
-          { "EXIF.MONTH.SHORT", N_("$(EXIF.MONTH.SHORT) - abbreviated exif month name according to the current locale") },
-          { "EXIF.MONTH.LONG", N_("$(EXIF.MONTH.LONG) - full exif month name according to the current locale") },
+          { "EXIF.MONTH.SHORT", N_("$(EXIF.MONTH.SHORT) - abbreviated EXIF month name according to the current locale") },
+          { "EXIF.MONTH.LONG", N_("$(EXIF.MONTH.LONG) - full EXIF month name according to the current locale") },
           { "EXIF.DAY", N_("$(EXIF.DAY) - EXIF day") },
           { "EXIF.HOUR", N_("$(EXIF.HOUR) - EXIF hour") },
           { "EXIF.HOUR.AMPM", N_("$(EXIF.HOUR.AMPM) - EXIF hour, 12-hour clock") },
@@ -214,7 +215,9 @@ const dt_gtkentry_completion_spec *dt_gtkentry_get_default_path_compl_list()
           { "EXIF.EXPOSURE", N_("$(EXIF.EXPOSURE) - EXIF exposure") },
           { "EXIF.EXPOSURE.BIAS", N_("$(EXIF.EXPOSURE.BIAS) - EXIF exposure bias") },
           { "EXIF.APERTURE", N_("$(EXIF.APERTURE) - EXIF aperture") },
+          { "EXIF.CROP_FACTOR", N_("$(EXIF.CROP_FACTOR) - EXIF crop factor") },
           { "EXIF.FOCAL.LENGTH", N_("$(EXIF.FOCAL.LENGTH) - EXIF focal length") },
+          { "EXIF.FOCAL.LENGTH.EQUIV", N_("$(EXIF.FOCAL.LENGTH.EQUIV) - EXIF 35 mm equivalent focal length") },
           { "EXIF.FOCUS.DISTANCE", N_("$(EXIF.FOCUS.DISTANCE) - EXIF focal distance") },
           { "EXIF.MAKER", N_("$(EXIF.MAKER) - camera maker") },
           { "EXIF.MODEL", N_("$(EXIF.MODEL) - camera model") },
@@ -233,11 +236,11 @@ const dt_gtkentry_completion_spec *dt_gtkentry_get_default_path_compl_list()
           { "PUBLISHER", N_("$(PUBLISHER) - publisher from metadata") },
           { "RIGHTS", N_("$(RIGHTS) - rights from metadata") },
           { "USERNAME", N_("$(USERNAME) - login name") },
-          { "FOLDER.PICTURE", N_("$(FOLDER.PICTURES) - pictures folder") },
+          { "FOLDER.PICTURES", N_("$(FOLDER.PICTURES) - pictures folder") },
           { "FOLDER.HOME", N_("$(FOLDER.HOME) - home folder") },
           { "FOLDER.DESKTOP", N_("$(FOLDER.DESKTOP) - desktop folder") },
           { "OPENCL.ACTIVATED", N_("$(OPENCL.ACTIVATED) - whether OpenCL is activated") },
-          { "CATEGORY", N_("$(CATEGORY0(category)) - subtag of level 0 in hierarchical tags") },
+          { "CATEGORY[,]", N_("$(CATEGORY[n,category]) - subtag of level n in hierarchical tags") },
           { "TAGS", N_("$(TAGS) - tags as set in metadata settings") },
           { "DARKTABLE.NAME", N_("$(DARKTABLE.NAME) - darktable name") },
           { "DARKTABLE.VERSION", N_("$(DARKTABLE.VERSION) - current darktable version") },
@@ -274,6 +277,8 @@ gchar *dt_gtkentry_build_completion_tooltip_text(const gchar *header,
 }
 
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

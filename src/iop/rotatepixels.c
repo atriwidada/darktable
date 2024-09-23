@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2014-2021 darktable developers.
+    Copyright (C) 2014-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -86,22 +86,26 @@ int operation_tags()
   return IOP_TAG_DISTORT;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_RGB;
 }
 
-const char *description(struct dt_iop_module_t *self)
+const char **description(struct dt_iop_module_t *self)
 {
-  return g_strdup(_("internal module to setup technical specificities of raw sensor.\n\n"
-                    "you should not touch values here !"));
+  return dt_iop_set_description(self,
+                                _("internal module to setup technical specificities of raw sensor.\n\n"
+                                  "you should not touch values here!"),
+                                NULL, NULL, NULL, NULL);
 }
 
 
-#ifdef _OPENMP
-#pragma omp declare simd
-#endif
-static void transform(const dt_dev_pixelpipe_iop_t *const piece, const float scale, const float *const x,
+DT_OMP_DECLARE_SIMD()
+static void transform(const dt_dev_pixelpipe_iop_t *const piece,
+                      const float scale,
+                      const float *const x,
                       float *o)
 {
   dt_iop_rotatepixels_data_t *d = (dt_iop_rotatepixels_data_t *)piece->data;
@@ -112,10 +116,10 @@ static void transform(const dt_dev_pixelpipe_iop_t *const piece, const float sca
 }
 
 
-#ifdef _OPENMP
-#pragma omp declare simd
-#endif
-static void backtransform(const dt_dev_pixelpipe_iop_t *const piece, const float scale, const float *const x,
+DT_OMP_DECLARE_SIMD()
+static void backtransform(const dt_dev_pixelpipe_iop_t *const piece,
+                          const float scale,
+                          const float *const x,
                           float *o)
 {
   dt_iop_rotatepixels_data_t *d = (dt_iop_rotatepixels_data_t *)piece->data;
@@ -127,15 +131,14 @@ static void backtransform(const dt_dev_pixelpipe_iop_t *const piece, const float
   o[1] += d->ry * scale;
 }
 
-int distort_transform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, float *const restrict points, size_t points_count)
+gboolean distort_transform(dt_iop_module_t *self,
+                           dt_dev_pixelpipe_iop_t *piece,
+                           float *const restrict points,
+                           size_t points_count)
 {
   const float scale = piece->buf_in.scale / piece->iscale;
 
-#ifdef _OPENMP
-#pragma omp parallel for simd default(none) \
-    dt_omp_firstprivate(points_count, points, scale, piece) \
-    schedule(static) if(points_count > 100) aligned(points:64)
-#endif
+  DT_OMP_FOR_SIMD(if(points_count > 100) aligned(points:64))
   for(size_t i = 0; i < points_count * 2; i += 2)
   {
     float pi[2], po[2];
@@ -149,19 +152,17 @@ int distort_transform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, floa
     points[i + 1] = po[1];
   }
 
-  return 1;
+  return TRUE;
 }
 
-int distort_backtransform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, float *const restrict points,
-                          size_t points_count)
+gboolean distort_backtransform(dt_iop_module_t *self,
+                               dt_dev_pixelpipe_iop_t *piece,
+                               float *const restrict points,
+                               size_t points_count)
 {
   const float scale = piece->buf_in.scale / piece->iscale;
 
-#ifdef _OPENMP
-#pragma omp parallel for simd default(none) \
-    dt_omp_firstprivate(points_count, points, scale, piece) \
-    schedule(static) if(points_count > 100) aligned(points:64)
-#endif
+  DT_OMP_FOR_SIMD(if(points_count > 100) aligned(points:64))
   for(size_t i = 0; i < points_count * 2; i += 2)
   {
     float pi[2], po[2];
@@ -175,19 +176,21 @@ int distort_backtransform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, 
     points[i + 1] = po[1];
   }
 
-  return 1;
+  return TRUE;
 }
 
-void distort_mask(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, const float *const in,
-                  float *const out, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
+void distort_mask(struct dt_iop_module_t *self,
+                  struct dt_dev_pixelpipe_iop_t *piece,
+                  const float *const in,
+                  float *const out,
+                  const dt_iop_roi_t *const roi_in,
+                  const dt_iop_roi_t *const roi_out)
 {
   // TODO
   memset(out, 0, sizeof(float) * roi_out->width * roi_out->height);
-  fprintf(stderr, "TODO: implement %s() in %s\n", __FUNCTION__, __FILE__);
+  dt_print(DT_DEBUG_ALWAYS, "TODO: implement %s() in %s\n", __FUNCTION__, __FILE__);
 }
 
-// 1st pass: how large would the output be, given this input roi?
-// this is always called with the full buffer before processing.
 void modify_roi_out(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, dt_iop_roi_t *roi_out,
                     const dt_iop_roi_t *const roi_in)
 {
@@ -230,7 +233,6 @@ void modify_roi_out(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, dt_iop
   roi_out->height = MAX(0, roi_out->height & ~1);
 }
 
-// 2nd pass: which roi would this operation need as input to fill the given output region?
 void modify_roi_in(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const dt_iop_roi_t *const roi_out,
                    dt_iop_roi_t *roi_in)
 {
@@ -240,7 +242,7 @@ void modify_roi_in(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const d
 
   dt_boundingbox_t aabb = { roi_out->x, roi_out->y, roi_out->x + roi_out->width, roi_out->y + roi_out->height };
 
-  dt_boundingbox_t aabb_in = { INFINITY, INFINITY, -INFINITY, -INFINITY };
+  dt_boundingbox_t aabb_in = { FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX };
 
   for(int c = 0; c < 4; c++)
   {
@@ -287,12 +289,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   const struct dt_interpolation *interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF);
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(ch, ch_width, ivoid, ovoid, roi_in, roi_out, scale) \
-  shared(piece, interpolation) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   // (slow) point-by-point transformation.
   // TODO: optimize with scanlines and linear steps between?
   for(int j = 0; j < roi_out->height; j++)
@@ -332,7 +329,7 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
 
   // this should not be used for normal images
   // (i.e. for those, when this iop is off by default)
-  if((d->rx == 0u) && (d->ry == 0u)) piece->enabled = 0;
+  if((d->rx == 0u) && (d->ry == 0u)) piece->enabled = FALSE;
 }
 
 void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
@@ -377,6 +374,9 @@ void gui_init(dt_iop_module_t *self)
 
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

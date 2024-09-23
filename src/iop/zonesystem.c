@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2010-2021 darktable developers.
+    Copyright (C) 2010-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -127,7 +127,9 @@ int default_group()
   return IOP_GROUP_TONE | IOP_GROUP_GRADING;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_LAB;
 }
@@ -175,7 +177,7 @@ static void process_common_setup(struct dt_iop_module_t *self, dt_dev_pixelpipe_
   const int width = roi_out->width;
   const int height = roi_out->height;
 
-  if(self->dev->gui_attached && (piece->pipe->type & DT_DEV_PIXELPIPE_PREVIEW) == DT_DEV_PIXELPIPE_PREVIEW)
+  if(self->dev->gui_attached && (piece->pipe->type & DT_DEV_PIXELPIPE_PREVIEW))
   {
     dt_iop_zonesystem_gui_data_t *g = (dt_iop_zonesystem_gui_data_t *)self->gui_data;
     dt_iop_gui_enter_critical_section(self);
@@ -209,7 +211,7 @@ static void process_common_cleanup(struct dt_iop_module_t *self, dt_dev_pixelpip
 
   /* if gui and have buffer lets gaussblur and fill buffer with zone indexes */
   if(self->dev->gui_attached
-     && (piece->pipe->type & DT_DEV_PIXELPIPE_PREVIEW) == DT_DEV_PIXELPIPE_PREVIEW
+     && (piece->pipe->type & DT_DEV_PIXELPIPE_PREVIEW)
      && g && g->in_preview_buffer
      && g->out_preview_buffer)
   {
@@ -226,24 +228,15 @@ static void process_common_cleanup(struct dt_iop_module_t *self, dt_dev_pixelpip
 
     if(gauss && tmp)
     {
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-      dt_omp_firstprivate(ch, height, width, ivoid) \
-      shared(tmp) \
-      schedule(static)
-#endif
-      for(size_t k = 0; k < (size_t)width * height; k++) tmp[k] = ((float *)ivoid)[ch * k];
+      DT_OMP_FOR()
+      for(size_t k = 0; k < (size_t)width * height; k++)
+        tmp[k] = ((float *)ivoid)[ch * k];
 
       dt_gaussian_blur(gauss, tmp, tmp);
 
       /* create zonemap preview for input */
       dt_iop_gui_enter_critical_section(self);
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-      dt_omp_firstprivate(height, size, width) \
-      shared(tmp, g) \
-      schedule(static)
-#endif
+      DT_OMP_FOR()
       for(size_t k = 0; k < (size_t)width * height; k++)
       {
         g->in_preview_buffer[k] = CLAMPS(tmp[k] * (size - 1) / 100.0f, 0, size - 2);
@@ -251,25 +244,16 @@ static void process_common_cleanup(struct dt_iop_module_t *self, dt_dev_pixelpip
       dt_iop_gui_leave_critical_section(self);
 
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-      dt_omp_firstprivate(ch, height, ovoid, width) \
-      shared(tmp) \
-      schedule(static)
-#endif
-      for(size_t k = 0; k < (size_t)width * height; k++) tmp[k] = ((float *)ovoid)[ch * k];
+      DT_OMP_FOR()
+      for(size_t k = 0; k < (size_t)width * height; k++)
+        tmp[k] = ((float *)ovoid)[ch * k];
 
       dt_gaussian_blur(gauss, tmp, tmp);
 
 
       /* create zonemap preview for output */
       dt_iop_gui_enter_critical_section(self);
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-      dt_omp_firstprivate(height, size, width) \
-      shared(tmp, g) \
-      schedule(static)
-#endif
+      DT_OMP_FOR()
       for(size_t k = 0; k < (size_t)width * height; k++)
       {
         g->out_preview_buffer[k] = CLAMPS(tmp[k] * (size - 1) / 100.0f, 0, size - 2);
@@ -285,7 +269,7 @@ static void process_common_cleanup(struct dt_iop_module_t *self, dt_dev_pixelpip
 void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,
              void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
-  if (!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
+  if(!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
                                          ivoid, ovoid, roi_in, roi_out))
     return;
 
@@ -298,11 +282,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   float *const restrict out = (float *const)ovoid;
   const size_t npixels = (size_t)roi_out->width * roi_out->height;
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(d, in, out, npixels, size) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < (size_t)4 * npixels; k += 4)
   {
     /* remap lightness into zonemap and apply lightness */
@@ -324,7 +304,7 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   dt_iop_zonesystem_data_t *data = (dt_iop_zonesystem_data_t *)piece->data;
   dt_iop_zonesystem_global_data_t *gd = (dt_iop_zonesystem_global_data_t *)self->global_data;
   cl_mem dev_zmo, dev_zms = NULL;
-  cl_int err = -999;
+  cl_int err = DT_OPENCL_DEFAULT_ERROR;
 
   const int devid = piece->pipe->devid;
   const int width = roi_in->width;
@@ -349,27 +329,13 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
                                                    zonemap_scale);
   if(dev_zms == NULL) goto error;
 
-  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };
-
-  dt_opencl_set_kernel_arg(devid, gd->kernel_zonesystem, 0, sizeof(cl_mem), (void *)&dev_in);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_zonesystem, 1, sizeof(cl_mem), (void *)&dev_out);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_zonesystem, 2, sizeof(int), (void *)&width);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_zonesystem, 3, sizeof(int), (void *)&height);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_zonesystem, 4, sizeof(int), (void *)&size);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_zonesystem, 5, sizeof(cl_mem), (void *)&dev_zmo);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_zonesystem, 6, sizeof(cl_mem), (void *)&dev_zms);
-  err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_zonesystem, sizes);
-
-  if(err != CL_SUCCESS) goto error;
-  dt_opencl_release_mem_object(dev_zmo);
-  dt_opencl_release_mem_object(dev_zms);
-  return TRUE;
+  err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_zonesystem, width, height,
+    CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(size), CLARG(dev_zmo), CLARG(dev_zms));
 
 error:
   dt_opencl_release_mem_object(dev_zmo);
   dt_opencl_release_mem_object(dev_zms);
-  dt_print(DT_DEBUG_OPENCL, "[opencl_zonesystem] couldn't enqueue kernel! %d\n", err);
-  return FALSE;
+  return err;
 }
 #endif
 
@@ -486,7 +452,7 @@ void gui_init(struct dt_iop_module_t *self)
 
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_IOP_MODULE_CONTROL_SPACING);
 
-  g->preview = dtgtk_drawing_area_new_with_aspect_ratio(1.0);
+  g->preview = dtgtk_drawing_area_new_with_height(0);
   g_signal_connect(G_OBJECT(g->preview), "size-allocate", G_CALLBACK(size_allocate_callback), self);
   g_signal_connect(G_OBJECT(g->preview), "draw", G_CALLBACK(dt_iop_zonesystem_preview_draw), self);
   gtk_widget_add_events(GTK_WIDGET(g->preview), GDK_POINTER_MOTION_MASK
@@ -694,7 +660,7 @@ static gboolean dt_iop_zonesystem_bar_scrolled(GtkWidget *widget, GdkEventScroll
   if(dt_gui_ignore_scroll(event)) return FALSE;
 
   int delta_y;
-  if(dt_gui_get_scroll_unit_deltas(event, NULL, &delta_y))
+  if(dt_gui_get_scroll_unit_delta(event, &delta_y))
   {
     p->size = CLAMP(p->size - delta_y, 4, MAX_ZONE_SYSTEM_SIZE);
     p->zone[cs] = -1;
@@ -873,6 +839,9 @@ void _iop_zonesystem_redraw_preview_callback(gpointer instance, gpointer user_da
   dt_control_queue_redraw_widget(g->preview);
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

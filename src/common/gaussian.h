@@ -61,6 +61,7 @@ void dt_gaussian_free(dt_gaussian_t *g);
 typedef struct dt_gaussian_cl_global_t
 {
   int kernel_gaussian_column_4c, kernel_gaussian_transpose_4c;
+  int kernel_gaussian_column_2c, kernel_gaussian_transpose_2c;
   int kernel_gaussian_column_1c, kernel_gaussian_transpose_1c;
 } dt_gaussian_cl_global_t;
 
@@ -92,6 +93,9 @@ cl_int dt_gaussian_blur_cl(dt_gaussian_cl_t *g, cl_mem dev_in, cl_mem dev_out);
 void dt_gaussian_free_cl(dt_gaussian_cl_t *g);
 #endif
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

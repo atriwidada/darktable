@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2012-2021 darktable developers.
+    Copyright (C) 2012-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -26,6 +26,7 @@
 #include "control/conf.h"
 #include "dtgtk/button.h"
 #include "control/jobs.h"
+#include "gui/accelerators.h"
 #include "libs/lib_api.h"
 #ifdef HAVE_MAP
 #include "views/view.h"
@@ -85,7 +86,7 @@ typedef struct dt_lib_geotagging_t
   GDateTime *datetime0;
   GTimeSpan offset;
   gboolean editing;
-  uint32_t imgid;
+  dt_imgid_t imgid;
   GList* imgs;
   int nb_imgs;
   GtkWidget *apply_offset;
@@ -114,7 +115,7 @@ typedef struct dt_lib_geotagging_t
 
 typedef struct dt_sel_img_t
 {
-  uint32_t imgid;
+  dt_imgid_t imgid;
   uint32_t segid;
   gchar dt[DT_DATETIME_LENGTH];
   gboolean counted;
@@ -140,14 +141,19 @@ const char *name(dt_lib_module_t *self)
   return _("geotagging");
 }
 
-const char **views(dt_lib_module_t *self)
+const char *description(dt_lib_module_t *self)
+{
+  return _("set geolocation information for\n"
+           "the currently selected images");
+}
+
+dt_view_type_flags_t views(dt_lib_module_t *self)
 {
 #ifdef HAVE_MAP
-  static const char *v[] = {"lighttable", "map", NULL};
+  return DT_VIEW_LIGHTTABLE | DT_VIEW_MAP;
 #else
-  static const char *v[] = {"lighttable", NULL};
+  return DT_VIEW_LIGHTTABLE;
 #endif
-  return v;
 }
 
 uint32_t container(dt_lib_module_t *self)
@@ -155,7 +161,7 @@ uint32_t container(dt_lib_module_t *self)
   return DT_UI_CONTAINER_PANEL_RIGHT_CENTER;
 }
 
-int position()
+int position(const dt_lib_module_t *self)
 {
   return 450;
 }
@@ -323,7 +329,7 @@ static void _refresh_images_displayed_on_track(const int segid, const gboolean a
                         || !((next->gl.latitude == im->gl.latitude)
                              && (next->gl.longitude == im->gl.longitude))))
       {
-        struct {uint32_t imgid; float latitude; float longitude; int count;} p;
+        struct {dt_imgid_t imgid; float latitude; float longitude; int count;} p;
         p.imgid = im->imgid;
         p.latitude = im->gl.latitude;
         p.longitude = im->gl.longitude;
@@ -369,7 +375,7 @@ static void _update_buttons(dt_lib_module_t *self)
                                                  : _("apply geo-location"));
   gtk_widget_set_tooltip_text(d->map.apply_gpx_button,
                               d->offset ? _("apply offset and geo-location to matching images"
-                                            "\ndouble operation: two ctrl-Z to undo")
+                                            "\ndouble operation: two ctrl-z to undo")
                                         : _("apply geo-location to matching images"));
   gtk_widget_set_sensitive(d->map.apply_gpx_button, d->map.nb_imgs);
   gtk_widget_set_sensitive(d->map.select_button,
@@ -767,7 +773,7 @@ static void _refresh_selected_images_datetime(dt_lib_module_t *self)
     dt_sel_img_t *img = i->data;
     const dt_image_t *cimg = dt_image_cache_get(darktable.image_cache, img->imgid, 'r');
     if(!cimg) continue;
-    dt_datetime_img_to_exif(img->dt, cimg);
+    dt_datetime_img_to_exif(img->dt, sizeof(img->dt), cimg);
     dt_image_cache_read_release(darktable.image_cache, cimg);
   }
 }
@@ -806,9 +812,10 @@ static void _preview_gpx_file(GtkWidget *widget, dt_lib_module_t *self)
 {
   dt_lib_geotagging_t *d = (dt_lib_geotagging_t *)self->data;
   GtkWidget *win = dt_ui_main_window(darktable.gui->ui);
-  GtkWidget *dialog = gtk_dialog_new_with_buttons(
-            _("GPX file track segments"), GTK_WINDOW(win), GTK_DIALOG_DESTROY_WITH_PARENT,
-            _("done"), GTK_RESPONSE_CANCEL, NULL);
+  GtkWidget *dialog = gtk_dialog_new_with_buttons(_("GPX file track segments"), GTK_WINDOW(win),
+                                                  GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                  _("_done"), GTK_RESPONSE_CANCEL, NULL);
+  gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
 
   gchar *filedir = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(widget));
   struct dt_gpx_t *gpx = dt_gpx_new(filedir);
@@ -849,7 +856,7 @@ static void _preview_gpx_file(GtkWidget *widget, dt_lib_module_t *self)
     _set_up_label(t->name, GTK_ALIGN_START, grid, 0, line, PANGO_ELLIPSIZE_NONE);
     _set_up_label(dts, GTK_ALIGN_START, grid, 1, line, PANGO_ELLIPSIZE_NONE);
     _set_up_label(dte, GTK_ALIGN_START, grid, 2, line, PANGO_ELLIPSIZE_NONE);
-    char *nb = g_strdup_printf("%d", t->nb_trkpt);
+    char *nb = g_strdup_printf("%u", t->nb_trkpt);
     _set_up_label(nb, GTK_ALIGN_CENTER, grid, 3, line, PANGO_ELLIPSIZE_NONE);
     g_free(nb);
     nb = g_strdup_printf("%d", nb_imgs);
@@ -868,7 +875,11 @@ static void _preview_gpx_file(GtkWidget *widget, dt_lib_module_t *self)
   _set_up_label(nb, GTK_ALIGN_CENTER, grid, 4, line, PANGO_ELLIPSIZE_NONE);
   g_free(nb);
 
-  dt_gpx_destroy(gpx);
+  if(gpx)
+  {
+    dt_gpx_destroy(gpx);
+    gpx = NULL;
+  }
 
   gtk_container_add(GTK_CONTAINER(w), grid);
 
@@ -900,11 +911,11 @@ static void _setup_selected_images_list(dt_lib_module_t *self)
                               -1, &stmt, NULL);
   while(sqlite3_step(stmt) == SQLITE_ROW)
   {
-    const uint32_t imgid = sqlite3_column_int(stmt, 0);
+    const dt_imgid_t imgid = sqlite3_column_int(stmt, 0);
     const dt_image_t *cimg = dt_image_cache_get(darktable.image_cache, imgid, 'r');
     char dt[DT_DATETIME_LENGTH];
     if(!cimg) continue;
-    dt_datetime_img_to_exif(dt, cimg);
+    dt_datetime_img_to_exif(dt, sizeof(dt), cimg);
     dt_image_cache_read_release(darktable.image_cache, cimg);
 
     dt_sel_img_t *img = g_malloc0(sizeof(dt_sel_img_t));
@@ -1324,9 +1335,9 @@ static GDateTime *_get_image_datetime(dt_lib_module_t *self)
   dt_lib_geotagging_t *d = (dt_lib_geotagging_t *)self->data;
   GList *selected = dt_collection_get_selected(darktable.collection, 1);
   const int selid = selected ? GPOINTER_TO_INT(selected->data) : 0;
-  const int imgid = dt_act_on_get_main_image();
+  const dt_imgid_t imgid = dt_act_on_get_main_image();
   GDateTime *datetime = NULL;
-  if((selid != 0) || ((selid == 0) && (imgid != -1)))
+  if((selid != 0) || ((selid == 0) && (dt_is_valid_imgid(imgid))))
   {
     // consider act on only if no selected
     char datetime_s[DT_DATETIME_LENGTH];
@@ -1351,8 +1362,11 @@ static void _refresh_image_datetime(dt_lib_module_t *self)
   _display_datetime(&d->dt0, datetime, FALSE, self);
   if(locked)
   {
-    GDateTime *datetime2 = g_date_time_add(datetime, d->offset);
-    _new_datetime(datetime2, self);
+    if (datetime)
+    {
+      GDateTime *datetime2 = g_date_time_add(datetime, d->offset);
+      _new_datetime(datetime2, self);
+    }
   }
   else
   {
@@ -1418,10 +1432,10 @@ static gboolean _datetime_scroll_over(GtkWidget *w, GdkEventScroll *event, dt_li
 
     int delta_y;
     int increment = 0;
-    if(dt_gui_get_scroll_unit_deltas(event, NULL, &delta_y))
+    if(dt_gui_get_scroll_unit_delta(event, &delta_y))
     {
-      if (delta_y < 0) increment = 1;
-      else if (delta_y > 0) increment = -1;
+      if(delta_y < 0) increment = 1;
+      else if(delta_y > 0) increment = -1;
     }
 
     if(dt_modifier_is(event->state, GDK_SHIFT_MASK))
@@ -1462,11 +1476,21 @@ static gboolean _datetime_scroll_over(GtkWidget *w, GdkEventScroll *event, dt_li
 }
 
 // type 0 date/time, 1 original date/time, 2 offset
-static GtkWidget *_gui_init_datetime(dt_lib_datetime_t *dt, const int type, dt_lib_module_t *self)
+static GtkWidget *_gui_init_datetime(gchar *text, dt_lib_datetime_t *dt, const int type, dt_lib_module_t *self,
+                                    GtkSizeGroup *group, GtkWidget *button, gchar *tip)
 {
   GtkWidget *flow = gtk_flow_box_new();
   gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(flow), 2);
-  gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(flow), 3);
+
+  GtkWidget *t = dt_ui_label_new(text);
+  gtk_size_group_add_widget(group, t);
+  gtk_container_add(GTK_CONTAINER(flow), t);
+  gtk_widget_set_tooltip_text(flow, tip);
+
+  GtkWidget *flow2 = gtk_flow_box_new();
+  gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(flow2), TRUE); // otherwise weird behavior
+  gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(flow2), 2);
+  gtk_container_add(GTK_CONTAINER(flow), flow2);
 
   GtkBox *box = NULL;
   for(int i = 0; i < DT_GEOTAG_PARTS_NB; i++)
@@ -1475,17 +1499,19 @@ static GtkWidget *_gui_init_datetime(dt_lib_datetime_t *dt, const int type, dt_l
 
     if(i == 0 && type == 2)
     {
+      gtk_box_set_homogeneous(box, TRUE); // creates some spacing
+      gtk_box_pack_start(box, button, TRUE, TRUE, 0);
       dt->sign = gtk_label_new("");
       gtk_box_pack_start(box, dt->sign, FALSE, FALSE, 0);
     }
     if(i >= 2 || type != 2)
     {
-      dt->widget[i] = gtk_entry_new();
-      gtk_entry_set_width_chars(GTK_ENTRY(dt->widget[i]), i == 0 ? 4 : i == 6 ? 3 : 2);
+      dt->widget[i] = dt_ui_entry_new(i == 0 ? 4 : i == 6 ? 3 : 2);
       gtk_entry_set_alignment(GTK_ENTRY(dt->widget[i]), 0.5);
       gtk_box_pack_start(box, dt->widget[i], FALSE, FALSE, 0);
       if(type == 0)
       {
+        dt_action_define(DT_ACTION(self), NULL, i <= 2 ? N_("date") : N_("time"), dt->widget[i], &dt_action_def_entry);
         gtk_widget_add_events(dt->widget[i], darktable.gui->scroll_mask);
       }
       else
@@ -1498,7 +1524,7 @@ static GtkWidget *_gui_init_datetime(dt_lib_datetime_t *dt, const int type, dt_l
     {
       gtk_widget_set_halign(GTK_WIDGET(box), GTK_ALIGN_END);
       gtk_widget_set_hexpand(GTK_WIDGET(box), TRUE);
-      gtk_container_add(GTK_CONTAINER(flow), GTK_WIDGET(box));
+      gtk_container_add(GTK_CONTAINER(flow2), GTK_WIDGET(box));
       box = NULL;
     }
     else if(i > 2 || type != 2)
@@ -1510,7 +1536,7 @@ static GtkWidget *_gui_init_datetime(dt_lib_datetime_t *dt, const int type, dt_l
     }
   }
 
-  gtk_container_foreach(GTK_CONTAINER(flow), (GtkCallback)gtk_widget_set_can_focus, GINT_TO_POINTER(FALSE));
+  gtk_container_foreach(GTK_CONTAINER(flow2), (GtkCallback)gtk_widget_set_can_focus, GINT_TO_POINTER(FALSE));
 
   return flow;
 }
@@ -1574,8 +1600,9 @@ static gboolean _datetime_key_pressed(GtkWidget *entry, GdkEventKey *event, dt_l
       g_signal_emit_by_name(d->dt.widget[0], "changed");
       return FALSE;
 
-    default: // block everything else
-      return TRUE;
+    default: // let shortcut system deal with everything else
+      g_signal_stop_emission_by_name(entry, "key-press-event");
+      return FALSE;
   }
 }
 
@@ -1716,55 +1743,45 @@ void gui_init(dt_lib_module_t *self)
   self->data = (void *)d;
   d->timezones = _lib_geotagging_get_timezones();
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  dt_gui_add_help_link(self->widget, dt_get_help_url(self->plugin_name));
 
   GtkGrid *grid = GTK_GRID(gtk_grid_new());
   gtk_grid_set_column_spacing(grid, DT_PIXEL_APPLY_DPI(5));
   int line = 0;
 
-  GtkWidget *label = dt_ui_label_new(_("date/time"));
-  gtk_grid_attach(grid, label, 0, line, 2, 1);
-  gtk_widget_set_tooltip_text(label, _("enter the new date/time (YYYY:MM:DD hh:mm:ss[.sss])"
-                                       "\nkey in the new numbers or scroll over the cell"));
+  GtkSizeGroup *group = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL);
+  GtkWidget *box = _gui_init_datetime(_("date/time"), &d->dt, 0, self, group, NULL,
+                                      _("enter the new date/time (YYYY:MM:DD hh:mm:ss[.sss])"
+                                        "\nkey in the new numbers or scroll over the cell"));
+  gtk_grid_attach(grid, box, 0, line++, 4, 1);
 
-  GtkWidget *box = _gui_init_datetime(&d->dt, 0, self);
-  gtk_grid_attach(grid, box, 2, line++, 2, 1);
+  box = _gui_init_datetime(_("original date/time"), &d->dt0, 1, self, group, NULL, NULL);
+  gtk_grid_attach(grid, box, 0, line++, 4, 1);
 
-  label = dt_ui_label_new(_("original date/time"));
-  gtk_grid_attach(grid, label, 0, line, 2, 1);
-
-  box = _gui_init_datetime(&d->dt0, 1, self);
-  gtk_grid_attach(grid, box, 2, line++, 2, 1);
-
-  label = dt_ui_label_new(_("date/time offset"));
-  gtk_grid_attach(grid, label, 0, line, 2, 1);
-  gtk_widget_set_tooltip_text(label, _("offset or difference ([-]dd hh:mm:ss[.sss])"));
-
-  d->lock_offset = dtgtk_togglebutton_new(dtgtk_cairo_paint_lock, CPF_STYLE_FLAT, NULL);
+  d->lock_offset = dtgtk_togglebutton_new(dtgtk_cairo_paint_lock, 0, NULL);
   gtk_widget_set_tooltip_text(d->lock_offset, _("lock date/time offset value to apply it onto another selection"));
   gtk_widget_set_halign(d->lock_offset, GTK_ALIGN_START);
-  gtk_grid_attach(grid, d->lock_offset, 2, line, 1, 1);
   g_signal_connect(G_OBJECT(d->lock_offset), "clicked", G_CALLBACK(_toggle_lock_button_callback), (gpointer)self);
 
-  box = _gui_init_datetime(&d->of, 2, self);
-  gtk_grid_attach(grid, box, 3, line++, 1, 1);
+  box = _gui_init_datetime(_("date/time offset"), &d->of, 2, self, group, d->lock_offset,
+                           _("offset or difference ([-]dd hh:mm:ss[.sss])"));
+  gtk_grid_attach(grid, box, 0, line++, 4, 1);
 
   // apply
-  d->apply_offset = dt_ui_button_new(_("apply offset"), _("apply offset to selected images"), NULL);
+  d->apply_offset = dt_action_button_new(self, N_("apply offset"), _apply_offset_callback, self,
+                                         _("apply offset to selected images"), 0, 0);
   gtk_grid_attach(grid, d->apply_offset , 0, line, 2, 1);
-  g_signal_connect(G_OBJECT(d->apply_offset), "clicked", G_CALLBACK(_apply_offset_callback), self);
 
-  d->apply_datetime = dt_ui_button_new(_("apply date/time"), _("apply the same date/time to selected images"), NULL);
+  d->apply_datetime = dt_action_button_new(self, N_("apply date/time"), _apply_datetime_callback, self,
+                                           _("apply the same date/time to selected images"), 0, 0);
   gtk_grid_attach(grid, d->apply_datetime , 2, line++, 2, 1);
-  g_signal_connect(G_OBJECT(d->apply_datetime), "clicked", G_CALLBACK(_apply_datetime_callback), self);
 
   // time zone entry
-  label = dt_ui_label_new(_(dt_confgen_get_label("plugins/lighttable/geotagging/tz")));
+  GtkWidget *label = dt_ui_label_new(_(dt_confgen_get_label("plugins/lighttable/geotagging/tz")));
   gtk_widget_set_tooltip_text(label, _(dt_confgen_get_tooltip("plugins/lighttable/geotagging/tz")));
 
   gtk_grid_attach(grid, label, 0, line, 2, 1);
 
-  d->timezone = gtk_entry_new();
+  d->timezone = dt_ui_entry_new(0);
   gtk_widget_set_tooltip_text(d->timezone, _("start typing to show a list of permitted values and select your timezone.\npress enter to confirm, so that the asterisk * disappears"));
   d->timezone_changed = dt_ui_label_new("");
 
@@ -1807,9 +1824,8 @@ void gui_init(dt_lib_module_t *self)
   g_signal_connect(G_OBJECT(d->timezone), "focus-out-event", G_CALLBACK(_timezone_focus_out), self);
 
   // gpx
-  d->gpx_button = dt_ui_button_new(_("apply GPX track file..."),
-                                   _("parses a GPX file and updates location of selected images"), NULL);
-  g_signal_connect(G_OBJECT(d->gpx_button), "clicked", G_CALLBACK(_choose_gpx_callback), self);
+  d->gpx_button = dt_action_button_new(self, N_("apply GPX track file..."), _choose_gpx_callback, self,
+                                       _("parses a GPX file and updates location of selected images"), 0, 0);
   gtk_grid_attach(grid, d->gpx_button, 0, line++, 4, 1);
   gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(grid), TRUE, TRUE, 0);
 #ifdef HAVE_MAP
@@ -1820,7 +1836,7 @@ void gui_init(dt_lib_module_t *self)
   d->map.gpx_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(d->map.gpx_section), TRUE, TRUE, 0);
 
-  label = dt_ui_section_label_new(_("gpx file"));
+  label = dt_ui_section_label_new(C_("section", "GPX file"));
   gtk_grid_attach(grid, label, 0, line++, 4, 1);
 
   d->map.gpx_button = dtgtk_button_new(dtgtk_cairo_paint_directory, CPF_NONE, NULL);
@@ -1844,7 +1860,7 @@ void gui_init(dt_lib_module_t *self)
   g_object_unref(model);
   gtk_widget_set_name(d->map.gpx_view, "gpx_list");
   gtk_widget_set_tooltip_text(GTK_WIDGET(d->map.gpx_view),
-                              _("list of track segments in the gpx file, for each segment:"
+                              _("list of track segments in the GPX file, for each segment:"
                                 "\n- the start date/time in local time (LT)"
                                 "\n- the number of track points"
                                 "\n- the number of matching images"
@@ -1874,7 +1890,7 @@ void gui_init(dt_lib_module_t *self)
 
   // avoid ugly console pixman messages due to headers
   gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(d->map.gpx_view), FALSE);
-  GtkWidget *w = dt_ui_scroll_wrap(GTK_WIDGET(d->map.gpx_view), 100, "plugins/lighttable/geotagging/heighttracklist");
+  GtkWidget *w = dt_ui_resize_wrap(GTK_WIDGET(d->map.gpx_view), 100, "plugins/lighttable/geotagging/heighttracklist");
   gtk_widget_set_size_request(w, -1, 100);
   gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(d->map.gpx_view), TRUE);
   gtk_box_pack_start(GTK_BOX(d->map.gpx_section), w, TRUE, TRUE, 0);
@@ -1891,10 +1907,10 @@ void gui_init(dt_lib_module_t *self)
   gtk_widget_set_tooltip_text(d->map.preview_button, _("show on map matching images"));
   g_signal_connect(GTK_TOGGLE_BUTTON(d->map.preview_button), "toggled", G_CALLBACK(_images_preview_toggled), self);
 
-  d->map.select_button = dt_ui_button_new(_("select images"), _("select matching images"), NULL);
+  d->map.select_button = dt_action_button_new(self, N_("select images"), _select_images, self,
+                                              _("select matching images"), 0, 0);
   gtk_widget_set_hexpand(d->map.select_button, TRUE);
   gtk_widget_set_sensitive(d->map.select_button, FALSE);
-  g_signal_connect(G_OBJECT(d->map.select_button), "clicked", G_CALLBACK(_select_images), self);
   gtk_grid_attach(grid, d->map.select_button, 1, line, 1, 1);
 
   d->map.nb_imgs_label = dt_ui_label_new("0/0");
@@ -1903,11 +1919,10 @@ void gui_init(dt_lib_module_t *self)
                               _("number of matching images versus selected images"));
   gtk_grid_attach(grid, d->map.nb_imgs_label, 2, line++, 1, 1);
 
-  d->map.apply_gpx_button = dt_ui_button_new(_("apply geo-location"),
-                                             _("apply geo-location to matching images"), NULL);
+  d->map.apply_gpx_button = dt_action_button_new(self, N_("apply geo-location"), _apply_gpx, self,
+                                                 _("apply geo-location to matching images"), 0, 0);
   gtk_widget_set_hexpand(d->map.apply_gpx_button, TRUE);
   gtk_widget_set_sensitive(d->map.apply_gpx_button, FALSE);
-  g_signal_connect(G_OBJECT(d->map.apply_gpx_button), "clicked", G_CALLBACK(_apply_gpx), self);
   gtk_grid_attach(grid, d->map.apply_gpx_button, 0, line++, 3, 1);
 
   gtk_box_pack_start(GTK_BOX(d->map.gpx_section), GTK_WIDGET(grid), TRUE, TRUE, 0);
@@ -1917,7 +1932,7 @@ void gui_init(dt_lib_module_t *self)
   gtk_widget_set_no_show_all(self->widget, TRUE);
   _update_layout(self);
 #endif
-  d->imgid = 0;
+  d->imgid = NO_IMGID;
   d->datetime = d->datetime0 = _get_image_datetime(self);
   if(d->datetime)
     g_date_time_ref(d->datetime);
@@ -1983,6 +1998,8 @@ void gui_cleanup(dt_lib_module_t *self)
   self->data = NULL;
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2010-2021 darktable developers.
+    Copyright (C) 2010-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -79,7 +79,9 @@ int flags()
   return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_DEPRECATED;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_RGB;
 }
@@ -93,12 +95,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   // PASS1: Get a luminance map of image...
   float *luminance = (float *)malloc(sizeof(float) * ((size_t)roi_out->width * roi_out->height));
 // double lsmax=0.0,lsmin=1.0;
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(ch, ivoid, roi_out) \
-  shared(luminance) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(int j = 0; j < roi_out->height; j++)
   {
     float *in = (float *)ivoid + (size_t)j * roi_out->width * ch;
@@ -125,13 +122,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   float *const restrict dest_buf = dt_alloc_perthread_float(roi_out->width, &destbuf_size);
 
 // CLAHE
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(ch, dest_buf, destbuf_size, ivoid, ovoid, rad, roi_in, \
-                      roi_out, slope) \
-  shared(luminance) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(int j = 0; j < roi_out->height; j++)
   {
     int yMin = fmax(0, j - rad);
@@ -306,7 +297,7 @@ void init(dt_iop_module_t *module)
 {
   module->params = calloc(1, sizeof(dt_iop_rlce_params_t));
   module->default_params = calloc(1, sizeof(dt_iop_rlce_params_t));
-  module->default_enabled = 0;
+  module->default_enabled = FALSE;
   module->params_size = sizeof(dt_iop_rlce_params_t);
   module->gui_data = NULL;
   *((dt_iop_rlce_params_t *)module->default_params) = (dt_iop_rlce_params_t){ 64, 1.25 };
@@ -350,6 +341,9 @@ void gui_init(struct dt_iop_module_t *self)
   g_signal_connect(G_OBJECT(g->scale2), "value-changed", G_CALLBACK(slope_callback), self);
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

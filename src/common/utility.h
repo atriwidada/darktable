@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2010-2020 darktable developers.
+    Copyright (C) 2010-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -22,6 +22,16 @@
 #include <string.h>
 #include <librsvg/rsvg.h>
 
+G_BEGIN_DECLS
+
+/** localize a string if it starts with the magic tag "_l10n_"; return the original string */
+/** if it does not have the tag */
+const char *dt_util_localize_string(const char *s);
+
+/** localize a name with possibly multiple components separated by vertical bars */
+/** caller must g_free() return value */
+gchar *dt_util_localize_segmented_name(const char *s);
+
 /** dynamically allocate and concatenate string */
 gchar *dt_util_dstrcat(gchar *str, const gchar *format, ...) __attribute__((format(printf, 2, 3)));
 
@@ -29,6 +39,8 @@ gchar *dt_util_dstrcat(gchar *str, const gchar *format, ...) __attribute__((form
 gchar *dt_util_str_replace(const gchar *string, const gchar *pattern, const gchar *substitute);
 /** count the number of occurrences of needle in haystack */
 guint dt_util_str_occurence(const gchar *haystack, const gchar *needle);
+/** format a floating point number string with dot separator locale independent */
+gchar *dt_util_float_to_str(const gchar *format, const double value);
 /** generate a string from the elements of the list, separated by separator. the result has to be freed. */
 gchar *dt_util_glist_to_str(const gchar *separator, GList *items);
 /** generate a GList from the elements of a string, separated by separator. the result has to be freed. */
@@ -50,6 +62,8 @@ gchar *dt_util_foo_to_utf8(const char *string);
 guint dt_util_string_count_char(const char *text, const char needle);
 /* helper function to convert en float numbers to local based numbers for scanf */
 void dt_util_str_to_loc_numbers_format(char *data);
+/* helper function to search for a string in a comma seperated string */
+gboolean dt_str_commasubstring(const char *list, const char *search);
 
 typedef enum dt_logo_season_t
 {
@@ -110,9 +124,22 @@ gboolean dt_has_same_path_basename(const char *filename1, const char *filename2)
 // set the filename2 extension to filename1 - return NULL if fails - result should be freed
 char *dt_copy_filename_extension(const char *filename1, const char *filename2);
 
+// change filename to have the given extension
+char *dt_filename_change_extension(const char *filename, const char *ext);
+
 // replaces all occurences of a substring in a string
 gchar *dt_str_replace(const char *string, const char *search, const char *replace);
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// returns true if current settings is scene-referred
+gboolean dt_is_scene_referred(void);
+
+// returns true if current settings is display-referred
+gboolean dt_is_display_referred(void);
+
+G_END_DECLS
+
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

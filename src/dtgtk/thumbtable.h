@@ -72,22 +72,18 @@ typedef struct dt_thumbtable_t
   int prefs_size;              // size value to determine overlays mode and css class
   int view_width, view_height; // last main widget size
   GdkRectangle thumbs_area;    // coordinate of all the currently loaded thumbs area
+  PangoRectangle manual_button;// coordinates of the click "here" text
 
   int center_offset; // in filemanager, we can have a gap, esp. for zoom==1, we need to center everything
 
   gboolean dragging;
-  int last_x, last_y;         // last position of cursor during move
-  int drag_dx, drag_dy;       // distance of move of the current dragging session
-  dt_thumbnail_t *drag_thumb; // thumb currently dragged (under the mouse)
-
-  // for some reasons, in filemanager, first image can not be at x=0
-  // in that case, we count the number of "scroll-top" try and reallign after 2 try
-  int realign_top_try;
+  int last_x, last_y;             // last position of cursor during move
+  int drag_dx, drag_dy;           // distance of move of the current dragging session
+  dt_thumbnail_t *drag_thumb;     // thumb currently dragged (under the mouse)
+  dt_imgid_t drag_initial_imgid;  // image_over_id at the dragging start
 
   gboolean mouse_inside; // is the mouse pointer inside thumbtable widget ?
   gboolean key_inside;   // is the key move pointer inside thumbtable widget ?
-
-  GSList *accel_closures; // list of associated accels
 
   // when performing a drag, we store the list of items to drag here
   // as this can change during the drag and drop (esp. because of the image_over_id)
@@ -105,6 +101,10 @@ typedef struct dt_thumbtable_t
   // let's remember previous thumbnail generation settings to detect if they change
   int pref_embedded;
   int pref_hq;
+
+  // scroll timeout values
+  guint scroll_timeout_id;
+  float scroll_value;
 } dt_thumbtable_t;
 
 dt_thumbtable_t *dt_thumbtable_new();
@@ -116,15 +116,15 @@ void dt_thumbtable_set_parent(dt_thumbtable_t *table, GtkWidget *new_parent, dt_
 int dt_thumbtable_get_offset(dt_thumbtable_t *table);
 gboolean dt_thumbtable_set_offset(dt_thumbtable_t *table, int offset, gboolean redraw);
 // set offset at specific imageid (and redraw if needed)
-gboolean dt_thumbtable_set_offset_image(dt_thumbtable_t *table, int imgid, gboolean redraw);
+gboolean dt_thumbtable_set_offset_image(dt_thumbtable_t *table, dt_imgid_t imgid, gboolean redraw);
 
 // fired when the zoom level change
 void dt_thumbtable_zoom_changed(dt_thumbtable_t *table, int oldzoom, int newzoom);
 
 // ensure that the mentioned image is visible by moving the view if needed
-gboolean dt_thumbtable_ensure_imgid_visibility(dt_thumbtable_t *table, int imgid);
+gboolean dt_thumbtable_ensure_imgid_visibility(dt_thumbtable_t *table, dt_imgid_t imgid);
 // check if the mentioned image is visible
-gboolean dt_thumbtable_check_imgid_visibility(dt_thumbtable_t *table, int imgid);
+gboolean dt_thumbtable_check_imgid_visibility(dt_thumbtable_t *table, dt_imgid_t imgid);
 
 // drag & drop receive function - handles dropping of files in the center view (files are added to the library)
 void dt_thumbtable_event_dnd_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y, GtkSelectionData *selection_data, guint target_type, guint time, gpointer user_data);
@@ -139,14 +139,14 @@ gboolean dt_thumbtable_reset_first_offset(dt_thumbtable_t *table);
 // scrollbar change
 void dt_thumbtable_scrollbar_changed(dt_thumbtable_t *table, float x, float y);
 
-// init all accels
-void dt_thumbtable_init_accels(dt_thumbtable_t *table);
-
 // change the type of overlays that should be shown (over or under the image)
 void dt_thumbtable_set_overlays_mode(dt_thumbtable_t *table, dt_thumbnail_overlay_t over);
 // change the timeout of the overlays block
 void dt_thumbtable_set_overlays_block_timeout(dt_thumbtable_t *table, const int timeout);
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

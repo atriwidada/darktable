@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2010-2021 darktable developers.
+    Copyright (C) 2010-2023 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -29,10 +29,12 @@
 #include "bauhaus/bauhaus.h"
 #include "common/colorspaces.h"
 #include "common/darktable.h"
-#include "common/imageio.h"
-#include "common/imageio_module.h"
 #include "control/conf.h"
+#include "imageio/imageio_common.h"
+#include "imageio/imageio_module.h"
 #include "imageio/format/imageio_format_api.h"
+
+#include <exiv2/exv_conf.h>
 
 DT_MODULE(3)
 
@@ -62,6 +64,7 @@ typedef struct dt_imageio_png_gui_t
  * for making useful code much more readable and discoverable ;)
  */
 
+#if !defined(PNG_eXIf_SUPPORTED) || (EXIV2_MAJOR_VERSION < 1 && EXIV2_MINOR_VERSION <= 27)
 static void PNGwriteRawProfile(png_struct *ping, png_info *ping_info, char *profile_type, guint8 *profile_data,
                                png_uint_32 length)
 {
@@ -116,10 +119,11 @@ static void PNGwriteRawProfile(png_struct *ping, png_info *ping_info, char *prof
   png_free(ping, text[0].key);
   png_free(ping, text);
 }
+#endif
 
 int write_image(dt_imageio_module_data_t *p_tmp, const char *filename, const void *ivoid,
                 dt_colorspaces_color_profile_type_t over_type, const char *over_filename,
-                void *exif, int exif_len, int imgid, int num, int total, struct dt_dev_pixelpipe_t *pipe,
+                void *exif, int exif_len, dt_imgid_t imgid, int num, int total, struct dt_dev_pixelpipe_t *pipe,
                 const gboolean export_masks)
 {
   dt_imageio_png_t *p = (dt_imageio_png_t *)p_tmp;
@@ -166,34 +170,110 @@ int write_image(dt_imageio_module_data_t *p_tmp, const char *filename, const voi
 
   // metadata has to be written before the pixels
 
-  // embed icc profile
-  if(imgid > 0)
-  {
-    cmsHPROFILE out_profile = dt_colorspaces_get_output_profile(imgid, over_type, over_filename)->profile;
-    uint32_t len = 0;
-    cmsSaveProfileToMem(out_profile, 0, &len);
-    if(len > 0)
-    {
-      char *buf = malloc(sizeof(char) * len);
-      char name[512] = { 0 };
-      cmsSaveProfileToMem(out_profile, buf, &len);
-      dt_colorspaces_get_profile_name(out_profile, "en", "US", name, sizeof(name));
+  // determine the actual (export vs colorout) color profile used
+  const dt_colorspaces_color_profile_t *cp = dt_colorspaces_get_output_profile(imgid, over_type, over_filename);
+  cmsHPROFILE out_profile = cp->profile;
 
-      png_set_iCCP(png_ptr, info_ptr, *name ? name : "icc", 0,
-#if(PNG_LIBPNG_VER < 10500)
-                   (png_charp)buf,
-#else
-                   (png_const_bytep)buf,
-#endif
-                   len);
+#ifdef PNG_iCCP_SUPPORTED
+  // embed ICC profile regardless of cICP later (compliant readers shall check cICP first)
+  uint32_t len = 0;
+  cmsSaveProfileToMem(out_profile, NULL, &len);
+  if(len > 0)
+  {
+    png_bytep buf = malloc(sizeof(png_byte) * len);
+    if(buf)
+    {
+      cmsSaveProfileToMem(out_profile, buf, &len);
+      char name[512] = { 0 };
+      dt_colorspaces_get_profile_name(out_profile, "en", "US", name, sizeof(name));
+      png_set_iCCP(png_ptr, info_ptr, *name ? name : "icc", 0, buf, len);
       free(buf);
     }
   }
+#endif
 
   // write exif data
-  PNGwriteRawProfile(png_ptr, info_ptr, "exif", exif, exif_len);
+  if(exif && exif_len > 0)
+  {
+#if defined(PNG_eXIf_SUPPORTED) && (EXIV2_MAJOR_VERSION >= 1 || EXIV2_MINOR_VERSION > 27)
+    png_set_eXIf_1(png_ptr, info_ptr, (uint32_t)exif_len, (png_bytep)exif);
+#else
+    /* The legacy tEXt chunk storage scheme implies the "Exif\0\0" APP1 prefix */
+    uint8_t *buf = malloc(exif_len + 6);
+    if(buf)
+    {
+      memcpy(buf, "Exif\0\0", 6);
+      memcpy(buf + 6, exif, exif_len);
+      PNGwriteRawProfile(png_ptr, info_ptr, "exif", buf, exif_len + 6);
+      free(buf);
+    }
+#endif
+  }
 
   png_write_info(png_ptr, info_ptr);
+
+  /*
+   * If possible, we want libpng to save the color encoding in a new
+   * cICP chunk as well (see https://www.w3.org/TR/png-3/#cICP-chunk).
+   * If we are unable to find the required color encoding data we have
+   * anyway provided an iCCP chunk (and hope we could at least do that!).
+   *
+   * Must come after png_write_info() for the time being.
+   * TODO: use known cICP chunk write support API once added to libpng
+   */
+  png_byte data[4] = {
+    DT_CICP_COLOR_PRIMARIES_UNSPECIFIED, DT_CICP_TRANSFER_CHARACTERISTICS_UNSPECIFIED,
+    DT_CICP_MATRIX_COEFFICIENTS_IDENTITY,
+    1, // full range
+  };
+
+  switch(cp->type)
+  {
+    case DT_COLORSPACE_SRGB:
+      data[0] = DT_CICP_COLOR_PRIMARIES_REC709;
+      data[1] = DT_CICP_TRANSFER_CHARACTERISTICS_SRGB;
+      break;
+    case DT_COLORSPACE_REC709:
+      data[0] = DT_CICP_COLOR_PRIMARIES_REC709;
+      data[1] = DT_CICP_TRANSFER_CHARACTERISTICS_REC709;
+      break;
+    case DT_COLORSPACE_LIN_REC709:
+      data[0] = DT_CICP_COLOR_PRIMARIES_REC709;
+      data[1] = DT_CICP_TRANSFER_CHARACTERISTICS_LINEAR;
+      break;
+    case DT_COLORSPACE_LIN_REC2020:
+      data[0] = DT_CICP_COLOR_PRIMARIES_REC2020;
+      data[1] = DT_CICP_TRANSFER_CHARACTERISTICS_LINEAR;
+      break;
+    case DT_COLORSPACE_PQ_REC2020:
+      data[0] = DT_CICP_COLOR_PRIMARIES_REC2020;
+      data[1] = DT_CICP_TRANSFER_CHARACTERISTICS_PQ;
+      break;
+    case DT_COLORSPACE_HLG_REC2020:
+      data[0] = DT_CICP_COLOR_PRIMARIES_REC2020;
+      data[1] = DT_CICP_TRANSFER_CHARACTERISTICS_HLG;
+      break;
+    case DT_COLORSPACE_PQ_P3:
+      data[0] = DT_CICP_COLOR_PRIMARIES_P3;
+      data[1] = DT_CICP_TRANSFER_CHARACTERISTICS_PQ;
+      break;
+    case DT_COLORSPACE_HLG_P3:
+      data[0] = DT_CICP_COLOR_PRIMARIES_P3;
+      data[1] = DT_CICP_TRANSFER_CHARACTERISTICS_HLG;
+      break;
+    case DT_COLORSPACE_DISPLAY_P3:
+      data[0] = DT_CICP_COLOR_PRIMARIES_P3;
+      data[1] = DT_CICP_TRANSFER_CHARACTERISTICS_SRGB;
+      break;
+    default:
+      break;
+  }
+
+  if(data[0] != DT_CICP_COLOR_PRIMARIES_UNSPECIFIED && data[1] != DT_CICP_TRANSFER_CHARACTERISTICS_UNSPECIFIED)
+  {
+    const png_byte chunk_name[5] = "cICP";
+    png_write_chunk(png_ptr, chunk_name, data, 4);
+  }
 
   /*
    * Get rid of filler (OR ALPHA) bytes, pack XRGB/RGBX/ARGB/RGBA into
@@ -201,7 +281,7 @@ int write_image(dt_imageio_module_data_t *p_tmp, const char *filename, const voi
    */
   png_set_filler(png_ptr, 0, PNG_FILLER_AFTER);
 
-  png_bytep *row_pointers = dt_alloc_align(64, sizeof(png_bytep) * height);
+  png_bytep *row_pointers = dt_alloc_align_type(png_bytep, height);
 
   if(p->bpp > 8)
   {
@@ -302,24 +382,6 @@ static int __attribute__((__unused__)) read_header(const char *filename, dt_imag
 #undef NUM_BYTES_CHECK
 }
 
-#if 0
-int dt_imageio_png_read_assure_8(dt_imageio_png_t *png)
-{
-  if (setjmp(png_jmpbuf(png->png_ptr)))
-  {
-    fclose(png->f);
-    png_destroy_read_struct(&png->png_ptr, NULL, NULL);
-    return 1;
-  }
-  uint32_t bit_depth = png_get_bit_depth(png->png_ptr, png->info_ptr);
-  // strip down to 8 bit channels
-  if (bit_depth == 16)
-    png_set_strip_16(png->png_ptr);
-
-  return 0;
-}
-#endif
-
 int read_image(dt_imageio_module_data_t *p_tmp, uint8_t *out)
 {
   dt_imageio_png_t *png = (dt_imageio_png_t *)p_tmp;
@@ -351,10 +413,24 @@ size_t params_size(dt_imageio_module_format_t *self)
   return sizeof(dt_imageio_module_data_t) + 2 * sizeof(int);
 }
 
-void *legacy_params(dt_imageio_module_format_t *self, const void *const old_params, const size_t old_params_size,
-                    const int old_version, const int new_version, size_t *new_size)
+void *legacy_params(dt_imageio_module_format_t *self,
+                    const void *const old_params,
+                    const size_t old_params_size,
+                    const int old_version,
+                    int *new_version,
+                    size_t *new_size)
 {
-  if(old_version == 1 && new_version == 3)
+  typedef struct dt_imageio_png_v3_t
+  {
+    dt_imageio_module_data_t global;
+    int bpp;
+    int compression;
+    FILE *f;
+    png_structp png_ptr;
+    png_infop info_ptr;
+  } dt_imageio_png_v3_t;
+
+  if(old_version == 1)
   {
     typedef struct dt_imageio_png_v1_t
     {
@@ -367,8 +443,8 @@ void *legacy_params(dt_imageio_module_format_t *self, const void *const old_para
       png_infop info_ptr;
     } dt_imageio_png_v1_t;
 
-    dt_imageio_png_v1_t *o = (dt_imageio_png_v1_t *)old_params;
-    dt_imageio_png_t *n = (dt_imageio_png_t *)malloc(sizeof(dt_imageio_png_t));
+    const dt_imageio_png_v1_t *o = (dt_imageio_png_v1_t *)old_params;
+    dt_imageio_png_v3_t *n = (dt_imageio_png_v3_t *)malloc(sizeof(dt_imageio_png_v3_t));
 
     n->global.max_width = o->max_width;
     n->global.max_height = o->max_height;
@@ -381,10 +457,12 @@ void *legacy_params(dt_imageio_module_format_t *self, const void *const old_para
     n->f = o->f;
     n->png_ptr = o->png_ptr;
     n->info_ptr = o->info_ptr;
-    *new_size = self->params_size(self);
+
+    *new_version = 3;
+    *new_size = sizeof(dt_imageio_module_data_t) + 2 * sizeof(int);
     return n;
   }
-  else if(old_version == 2 && new_version == 3)
+  else if(old_version == 2)
   {
     typedef struct dt_imageio_png_v2_t
     {
@@ -398,8 +476,8 @@ void *legacy_params(dt_imageio_module_format_t *self, const void *const old_para
       png_infop info_ptr;
     } dt_imageio_png_v2_t;
 
-    dt_imageio_png_v2_t *o = (dt_imageio_png_v2_t *)old_params;
-    dt_imageio_png_t *n = (dt_imageio_png_t *)malloc(sizeof(dt_imageio_png_t));
+    const dt_imageio_png_v2_t *o = (dt_imageio_png_v2_t *)old_params;
+    dt_imageio_png_v3_t *n = (dt_imageio_png_v3_t *)malloc(sizeof(dt_imageio_png_v3_t));
 
     n->global.max_width = o->max_width;
     n->global.max_height = o->max_height;
@@ -412,17 +490,37 @@ void *legacy_params(dt_imageio_module_format_t *self, const void *const old_para
     n->f = o->f;
     n->png_ptr = o->png_ptr;
     n->info_ptr = o->info_ptr;
-    *new_size = self->params_size(self);
+
+    *new_version = 3;
+    *new_size = sizeof(dt_imageio_module_data_t) + 2 * sizeof(int);
     return n;
   }
+
+
+  // incremental update supported:
+  /*
+  typedef struct dt_imageio_png_v4_t
+  {
+    ...
+  } dt_imageio_png_v4_t;
+
+  if(old_version == 3)
+  {
+    // let's update from 3 to 4
+
+    ...
+    *new_size = sizeof(dt_imageio_module_data_t) + 2 * sizeof(int);
+    *new_version = 4;
+    return n;
+  }
+  */
   return NULL;
 }
 
 void *get_params(dt_imageio_module_format_t *self)
 {
   dt_imageio_png_t *d = (dt_imageio_png_t *)calloc(1, sizeof(dt_imageio_png_t));
-  const char *bpp = dt_conf_get_string_const("plugins/imageio/format/png/bpp");
-  d->bpp = atoi(bpp);
+  d->bpp = dt_conf_get_int("plugins/imageio/format/png/bpp");
   if(d->bpp != 8 && d->bpp != 16)
     d->bpp = 8;
 
@@ -458,6 +556,15 @@ int set_params(dt_imageio_module_format_t *self, const void *params, const int s
   return 0;
 }
 
+int dimension(struct dt_imageio_module_format_t *self, struct dt_imageio_module_data_t *data, uint32_t *width,
+              uint32_t *height)
+{
+  /* maximum dimensions supported by PNG images */
+  *width = 2147483647U;
+  *height = 2147483647U;
+  return 1;
+}
+
 int bpp(dt_imageio_module_data_t *p)
 {
   return ((dt_imageio_png_t *)p)->bpp;
@@ -480,7 +587,7 @@ const char *extension(dt_imageio_module_data_t *data)
 
 const char *name()
 {
-  return _("PNG (8/16-bit)");
+  return _("PNG");
 }
 
 static void bit_depth_changed(GtkWidget *widget, gpointer user_data)
@@ -510,8 +617,7 @@ void gui_init(dt_imageio_module_format_t *self)
 {
   dt_imageio_png_gui_t *gui = (dt_imageio_png_gui_t *)malloc(sizeof(dt_imageio_png_gui_t));
   self->gui_data = (void *)gui;
-  const char *conf_bpp = dt_conf_get_string_const("plugins/imageio/format/png/bpp");
-  int bpp = atoi(conf_bpp);
+  const int bpp = dt_conf_get_int("plugins/imageio/format/png/bpp");
 
   // PNG compression level might actually be zero!
   int compression = 5;
@@ -521,21 +627,15 @@ void gui_init(dt_imageio_module_format_t *self)
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
   // Bit depth combo box
-  gui->bit_depth = dt_bauhaus_combobox_new(NULL);
-  dt_bauhaus_widget_set_label(gui->bit_depth, NULL, N_("bit depth"));
-  dt_bauhaus_combobox_add(gui->bit_depth, _("8 bit"));
-  dt_bauhaus_combobox_add(gui->bit_depth, _("16 bit"));
+  DT_BAUHAUS_COMBOBOX_NEW_FULL(gui->bit_depth, self, NULL, N_("bit depth"), NULL,
+                               0, bit_depth_changed, self,
+                               N_("8 bit"), N_("16 bit"));
   if(bpp == 16)
     dt_bauhaus_combobox_set(gui->bit_depth, 1);
-  else {
-    bpp = 8; // We know only about 8 or 16 bits, at least for now
-    dt_bauhaus_combobox_set(gui->bit_depth, 0);
-  }
   gtk_box_pack_start(GTK_BOX(self->widget), gui->bit_depth, TRUE, TRUE, 0);
-  g_signal_connect(G_OBJECT(gui->bit_depth), "value-changed", G_CALLBACK(bit_depth_changed), NULL);
 
   // Compression level slider
-  gui->compression = dt_bauhaus_slider_new_with_range(NULL,
+  gui->compression = dt_bauhaus_slider_new_with_range((dt_iop_module_t*)self,
                                                       dt_confgen_get_int("plugins/imageio/format/png/compression", DT_MIN),
                                                       dt_confgen_get_int("plugins/imageio/format/png/compression", DT_MAX),
                                                       1,
@@ -564,6 +664,8 @@ int flags(dt_imageio_module_data_t *data)
   return FORMAT_FLAGS_SUPPORT_XMP;
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

@@ -132,11 +132,21 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
     ${MINGW_PATH}/libssl*.dll
     )
 
+  if(Imath_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #IMATH
+      ${MINGW_PATH}/libImath-*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif()
+
   if(OpenEXR_FOUND)
     file(GLOB TMP_SYSTEM_RUNTIME_LIBS
       #OPENEXR
-      ${MINGW_PATH}/libIexMath*.dll
-      ${MINGW_PATH}/libIlmImfUtil*.dll
+      ${MINGW_PATH}/libIex-*.dll
+      ${MINGW_PATH}/libIlmThread-*.dll
+      ${MINGW_PATH}/libOpenEXR-*.dll
+      ${MINGW_PATH}/libOpenEXRCore-*.dll
     )
     list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
   endif()
@@ -144,10 +154,7 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
   if(OpenJPEG_FOUND)
     file(GLOB TMP_SYSTEM_RUNTIME_LIBS
       #OPENJPEG
-      ${MINGW_PATH}/libopenjp3d*.dll
-      ${MINGW_PATH}/libopenjpip*.dll
-      ${MINGW_PATH}/libopenjpwl*.dll
-      ${MINGW_PATH}/libopenmj2*.dll
+      ${MINGW_PATH}/libopenjp2*.dll
     )
     list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
   endif()
@@ -156,8 +163,37 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
     file(GLOB TMP_SYSTEM_RUNTIME_LIBS
       #GRAPHICKSMAGICK
       ${MINGW_PATH}/libltdl*.dll
-      ${MINGW_PATH}/libGraphicsMagick++*.dll
-      ${MINGW_PATH}/libGraphicsMagickWand*.dll
+      ${MINGW_PATH}/libGraphicsMagick-*.dll
+      #CODERS
+      ${MINGW_PATH}/libbrotli*.dll
+      ${MINGW_PATH}/libbz2*.dll
+      ${MINGW_PATH}/libhwy.dll
+      ${MINGW_PATH}/libjasper.dll
+      ${MINGW_PATH}/libjxl*.dll
+      ${MINGW_PATH}/libsharpyuv*.dll
+      ${MINGW_PATH}/libwebp-*.dll
+      ${MINGW_PATH}/libwebpmux*.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif()
+
+  if(ImageMagick_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #IMAGEMAGICK
+      ${MINGW_PATH}/libltdl*.dll
+      ${MINGW_PATH}/libMagickCore-*.dll
+      ${MINGW_PATH}/libMagickWand-*.dll
+      #CODERS
+      ${MINGW_PATH}/libbrotli*.dll
+      ${MINGW_PATH}/libbz2*.dll
+      ${MINGW_PATH}/libhwy.dll
+      ${MINGW_PATH}/libjxl*.dll
+      ${MINGW_PATH}/liblzma*.dll
+      ${MINGW_PATH}/libopenjp2*.dll
+      ${MINGW_PATH}/libsharpyuv*.dll
+      ${MINGW_PATH}/libwebp-*.dll
+      ${MINGW_PATH}/libwebpdemux*.dll
+      ${MINGW_PATH}/libwebpmux*.dll
     )
     list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
   endif()
@@ -171,12 +207,22 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
     )
     list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
   endif()
+  
+  if(JXL_FOUND)
+    file(GLOB TMP_SYSTEM_RUNTIME_LIBS
+      #LIBJXL
+      ${MINGW_PATH}/libjxl.dll
+      ${MINGW_PATH}/libjxl_threads.dll
+    )
+    list(APPEND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${TMP_SYSTEM_RUNTIME_LIBS})
+  endif()
 
   if(WebP_FOUND)
     file(GLOB TMP_SYSTEM_RUNTIME_LIBS
       #LIBWEBP
-      ${MINGW_PATH}/libwebpdecoder*.dll
-      ${MINGW_PATH}/libwebpdemux*.dll
+      ${MINGW_PATH}/libsharpyuv*.dll
+      #${MINGW_PATH}/libwebpdecoder*.dll
+      #${MINGW_PATH}/libwebpdemux*.dll
       #${MINGW_PATH}/libwebpextras*.dll
       ${MINGW_PATH}/libwebpmux*.dll
     )
@@ -196,6 +242,12 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
       DESTINATION lib/
       COMPONENT DTApplication
       PATTERN "*.a" EXCLUDE)
+
+  # Add glib-networking modules
+  install(DIRECTORY
+      "${MINGW_PATH}/../lib/gio/modules/"
+      DESTINATION lib/gio/modules/
+      COMPONENT DTApplication)
 
   # Add adwaita-icon-theme files
   install(DIRECTORY
@@ -250,12 +302,23 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
   # Add GraphicsMagick libraries
   if(GraphicsMagick_FOUND)
     install(DIRECTORY
-        "${MINGW_PATH}/../lib/GraphicsMagick-${GraphicsMagick_PKGCONF_VERSION}/modules-Q8/coders"
-        DESTINATION lib/GraphicsMagick-${GraphicsMagick_PKGCONF_VERSION}/modules-Q8/
+        "${MINGW_PATH}/../lib/GraphicsMagick-${GraphicsMagick_VERSION}/modules-Q16/coders"
+        DESTINATION lib/GraphicsMagick-${GraphicsMagick_VERSION}/modules-Q16/
         COMPONENT DTApplication
         FILES_MATCHING PATTERN "*"
-        PATTERN "*.a" EXCLUDE
-        PATTERN "*.la" EXCLUDE)
+        # For some reason *.la files must be kept alongside DLLs
+        PATTERN "*.a" EXCLUDE)
+  endif()
+
+  # Add ImageMagick libraries
+  if(ImageMagick_FOUND)
+    install(DIRECTORY
+        "${MINGW_PATH}/../lib/ImageMagick-${ImageMagick_VERSION}/modules-Q16HDRI/coders"
+        DESTINATION lib/ImageMagick-${ImageMagick_VERSION}/modules-Q16HDRI/
+        COMPONENT DTApplication
+        FILES_MATCHING PATTERN "*"
+        # For some reason *.la files must be kept alongside DLLs
+        PATTERN "*.a" EXCLUDE)
   endif()
 
   # Add lensfun libraries
@@ -289,7 +352,7 @@ if (WIN32 AND NOT BUILD_MSYS2_INSTALL)
 
   # Add ca-cert for curl
   install(FILES
-      "${MINGW_PATH}/../ssl/certs/ca-bundle.crt"
+      "${MINGW_PATH}/../etc/ssl/certs/ca-bundle.crt"
       DESTINATION share/curl/
       RENAME curl-ca-bundle.crt
       COMPONENT DTApplication)

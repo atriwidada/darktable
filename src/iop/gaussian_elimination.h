@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2017-2020 darktable developers.
+    Copyright (C) 2017-2023 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -155,28 +155,22 @@ static inline int pseudo_solve_gaussian(double *const restrict A,
 
   if(m < n)
   {
-    fprintf(stderr, "pseudo solve: cannot cast %zu x %zu matrix\n", m, n);
+    dt_print(DT_DEBUG_ALWAYS, "pseudo solve: cannot cast %zu x %zu matrix\n", m, n);
     return 0;
   }
 
-  double *const restrict A_square = dt_alloc_align(64, n * n * sizeof(double));
-  double *const restrict y_square = dt_alloc_align(64, n * sizeof(double));
+  double *const restrict A_square = dt_alloc_align_double(n * n);
+  double *const restrict y_square = dt_alloc_align_double(n);
 
-  #ifdef _OPENMP
-  #pragma omp parallel sections
-  #endif
+  DT_OMP_PRAGMA(parallel sections)
   {
-    #ifdef _OPENMP
-    #pragma omp section
-    #endif
+    DT_OMP_PRAGMA(section)
     {
       // Prepare the least squares matrix = A' A
       transpose_dot_matrix(A, A_square, m, n);
     }
 
-    #ifdef _OPENMP
-    #pragma omp section
-    #endif
+    DT_OMP_PRAGMA(section)
     {
       // Prepare the y square vector = A' y
       transpose_dot_vector(A, y, y_square, m, n);
@@ -192,3 +186,9 @@ static inline int pseudo_solve_gaussian(double *const restrict A,
 
   return valid;
 }
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
+// vim: shiftwidth=2 expandtab tabstop=2 cindent
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

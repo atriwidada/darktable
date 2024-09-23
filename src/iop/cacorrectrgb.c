@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2021 darktable developers.
+    Copyright (C) 2021-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -15,6 +15,9 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
+#include "common/extra_optimizations.h"
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -161,7 +164,7 @@ const char *name()
   return _("chromatic aberrations");
 }
 
-const char *description(struct dt_iop_module_t *self)
+const char **description(struct dt_iop_module_t *self)
 {
   return dt_iop_set_description(self, _("correct chromatic aberrations"),
                                       _("corrective"),
@@ -180,7 +183,9 @@ int default_group()
   return IOP_GROUP_CORRECT | IOP_GROUP_TECHNICAL;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_RGB;
 }
@@ -190,13 +195,14 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   memcpy(piece->data, p1, self->params_size);
 }
 
-static void normalize_manifolds(const float *const restrict blurred_in, float *const restrict blurred_manifold_lower, float *const restrict blurred_manifold_higher, const size_t width, const size_t height, const dt_iop_cacorrectrgb_guide_channel_t guide)
+static void normalize_manifolds(const float *const restrict blurred_in,
+                                float *const restrict blurred_manifold_lower,
+                                float *const restrict blurred_manifold_higher,
+                                const size_t width,
+                                const size_t height,
+                                const dt_iop_cacorrectrgb_guide_channel_t guide)
 {
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-dt_omp_firstprivate(blurred_in, blurred_manifold_lower, blurred_manifold_higher, width, height, guide) \
-  schedule(simd:static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < width * height; k++)
   {
     const float weighth = fmaxf(blurred_manifold_higher[k * 4 + 3], 1E-2f);
@@ -257,8 +263,8 @@ static void get_manifolds(const float* const restrict in, const size_t width, co
   float *const restrict blurred_manifold_higher = dt_alloc_align_float(width * height * 4);
   float *const restrict blurred_manifold_lower = dt_alloc_align_float(width * height * 4);
 
-  dt_aligned_pixel_t max = {INFINITY, INFINITY, INFINITY, INFINITY};
-  dt_aligned_pixel_t min = {-INFINITY, -INFINITY, -INFINITY, 0.0f};
+  dt_aligned_pixel_t max = {FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX};
+  dt_aligned_pixel_t min = {-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0f};
   // start with a larger blur to estimate the manifolds if we refine them
   // later on
   const float blur_size = refine_manifolds ? sigma2 : sigma;
@@ -270,11 +276,7 @@ static void get_manifolds(const float* const restrict in, const size_t width, co
   // higher manifold is the blur of all pixels that are above average,
   // lower manifold is the blur of all pixels that are below average
   // we use the guide channel to categorize the pixels as above or below average
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-dt_omp_firstprivate(in, blurred_in, manifold_lower, manifold_higher, width, height, guide) \
-  schedule(simd:static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < width * height; k++)
   {
     const float pixelg = fmaxf(in[k * 4 + guide], 1E-6f);
@@ -339,11 +341,7 @@ dt_omp_firstprivate(in, blurred_in, manifold_lower, manifold_higher, width, heig
     // refine the manifolds
     // improve result especially on very degraded images
     // we use a blur of normal size for this step
-  #ifdef _OPENMP
-  #pragma omp parallel for default(none) \
-  dt_omp_firstprivate(in, blurred_in, manifold_lower, manifold_higher, blurred_manifold_lower, blurred_manifold_higher, width, height, guide) \
-    schedule(simd:static)
-  #endif
+    DT_OMP_FOR()
     for(size_t k = 0; k < width * height; k++)
     {
       // in order to refine the manifolds, we will compute weights
@@ -485,11 +483,7 @@ dt_omp_firstprivate(in, blurred_in, manifold_lower, manifold_higher, width, heig
   dt_free_align(manifold_higher);
 
   // store all manifolds in the same structure to make upscaling faster
-#ifdef _OPENMP
-#pragma omp parallel for simd default(none) \
-dt_omp_firstprivate(manifolds, blurred_manifold_lower, blurred_manifold_higher, width, height, guide) \
-  schedule(simd:static) aligned(manifolds, blurred_manifold_lower, blurred_manifold_higher:64)
-#endif
+  DT_OMP_FOR_SIMD(aligned(manifolds, blurred_manifold_lower, blurred_manifold_higher:64))
   for(size_t k = 0; k < width * height; k++)
   {
     for(size_t c = 0; c < 3; c++)
@@ -512,11 +506,7 @@ static void apply_correction(const float* const restrict in,
                           float* const restrict out)
 
 {
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-dt_omp_firstprivate(in, width, height, guide, manifolds, out, sigma, mode) \
-  schedule(simd:static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < width * height; k++)
   {
     const float high_guide = fmaxf(manifolds[k * 6 + guide], 1E-6f);
@@ -586,12 +576,8 @@ static void reduce_artifacts(const float* const restrict in,
 {
   // in_out contains the 2 guided channels of in, and the 2 guided channels of out
   // it allows to blur all channels in one 4-channel gaussian blur instead of 2
-  float *const restrict DT_ALIGNED_PIXEL in_out = dt_alloc_align_float(width * height * 4);
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(in, out, in_out, width, height, guide)        \
-  schedule(simd:static)
-#endif
+  float *const restrict in_out = dt_alloc_align_float(width * height * 4);
+  DT_OMP_FOR()
   for(size_t k = 0; k < width * height; k++)
   {
     for(size_t kc = 0; kc <= 1; kc++)
@@ -603,8 +589,8 @@ static void reduce_artifacts(const float* const restrict in,
   }
 
   float *const restrict blurred_in_out = dt_alloc_align_float(width * height * 4);
-  dt_aligned_pixel_t max = {INFINITY, INFINITY, INFINITY, INFINITY};
-  dt_aligned_pixel_t min = {0.0f, 0.0f, 0.0f, 0.0f};
+  const dt_aligned_pixel_t max = {FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX};
+  const dt_aligned_pixel_t min = {0.0f, 0.0f, 0.0f, 0.0f};
   dt_gaussian_t *g = dt_gaussian_init(width, height, 4, max, min, sigma, 0);
   if(!g) return;
   dt_gaussian_blur_4c(g, in_out, blurred_in_out);
@@ -620,11 +606,7 @@ static void reduce_artifacts(const float* const restrict in,
   // the local averages are very different.
   // we use the same weight for all channels, as using different weights
   // introduces artifacts in practice.
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-dt_omp_firstprivate(in, out, blurred_in_out, width, height, guide, safety) \
-  schedule(simd:static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < width * height; k++)
   {
     float w = 1.0f;
@@ -681,7 +663,7 @@ static void reduce_chromatic_aberrations(const float* const restrict in,
 void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
-  if (!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
+  if(!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
                                          ivoid, ovoid, roi_in, roi_out))
     return; // ivoid has been copied to ovoid and the module's trouble flag has been set
 
@@ -751,7 +733,7 @@ void gui_init(dt_iop_module_t *self)
                                              "high values can lead to overshooting\n"
                                              "and edge bleeding."));
 
-  gtk_box_pack_start(GTK_BOX(self->widget), dt_ui_section_label_new(_("advanced parameters")), TRUE, TRUE, 0);
+  gtk_box_pack_start(GTK_BOX(self->widget), dt_ui_section_label_new(C_("section", "advanced parameters")), TRUE, TRUE, 0);
   g->mode = dt_bauhaus_combobox_from_params(self, "mode");
   gtk_widget_set_tooltip_text(g->mode, _("correction mode to use.\n"
                                          "can help with multiple\n"
@@ -769,3 +751,9 @@ void gui_init(dt_iop_module_t *self)
                                                     "colors too much on other\n"
                                                     "images."));
 }
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
+// vim: shiftwidth=2 expandtab tabstop=2 cindent
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

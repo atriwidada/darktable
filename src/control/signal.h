@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2021 darktable developers.
+    Copyright (C) 2011-2022 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -19,6 +19,8 @@
 #pragma once
 
 #include <glib-object.h>
+
+G_BEGIN_DECLS
 
 /** \brief enum of signals to listen for in darktable.
     \note To add a new signal, first off add a enum and
@@ -62,7 +64,7 @@ typedef enum dt_signal_t
    */
   DT_SIGNAL_VIEWMANAGER_VIEW_CANNOT_CHANGE,
 
-  /** \bief This signal is raised when a thumb is doubleclicked in
+  /** \brief This signal is raised when a thumb is double-clicked in
     thumbtable (filemananger, filmstrip)
     1 : int the imageid of the thumbnail
     no returned value
@@ -168,6 +170,13 @@ typedef enum dt_signal_t
     */
   DT_SIGNAL_DEVELOP_HISTORY_CHANGE,
 
+  /** \brief This signal is raised when the history is compressed or removed.
+      in this case any module having a reference to the history must be
+      clear.
+  no param, no returned value
+    */
+  DT_SIGNAL_DEVELOP_HISTORY_INVALIDATED,
+
   /** \brief This signal is raised when a module is removed from the history stack
     1 module
     no returned value
@@ -179,6 +188,14 @@ typedef enum dt_signal_t
 
   /** \brief This signal is raised when image is changed in darkroom */
   DT_SIGNAL_DEVELOP_IMAGE_CHANGED,
+
+  /** \brief This signal is raised when a distort module is used/changed
+    no param, no returned value
+   */
+  DT_SIGNAL_DEVELOP_DISTORT,
+
+  /** \brief This signal is raised when image is removed from database */
+  DT_SIGNAL_IMAGE_REMOVED,
 
   /** \brief This signal is raised when the screen profile has changed
   no param, no returned value
@@ -258,6 +275,11 @@ typedef enum dt_signal_t
   /* \brief This signal is raised when the user choses a new location from map (module location)*/
   DT_SIGNAL_LOCATION_CHANGED,
 
+  /** \brief This signal is raised when a storage module signalizes to enable/disable the export
+    no param, no returned value
+  */
+  DT_SIGNAL_IMAGEIO_STORAGE_EXPORT_ENABLE,
+
   /* do not touch !*/
   DT_SIGNAL_COUNT
 } dt_signal_t;
@@ -271,7 +293,7 @@ typedef enum dt_debug_signal_action_t
   DT_DEBUG_SIGNAL_ACT_PRINT_TRACE = 1 << 3,
 } dt_debug_signal_action_t;
 
-/* inititialize the signal framework */
+/* initialize the signal framework */
 struct dt_control_signal_t *dt_control_signal_init();
 /* raises a signal */
 void dt_control_signal_raise(const struct dt_control_signal_t *ctlsig, const dt_signal_t signal, ...);
@@ -316,6 +338,10 @@ void dt_control_signal_unblock_by_func(const struct dt_control_signal_t *ctlsig,
     dt_control_signal_disconnect(ctlsig, cb, user_data);                                                                         \
   } while (0)
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+G_END_DECLS
+
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

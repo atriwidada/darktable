@@ -24,7 +24,6 @@
 extern "C" {
 #endif
 
-void dt_osx_autoset_dpi(GtkWidget *widget);
 float dt_osx_get_ppd();
 void dt_osx_disallow_fullscreen(GtkWidget *widget);
 gboolean dt_osx_file_trash(const char *filename, GError **error);
@@ -35,6 +34,9 @@ void dt_osx_focus_window();
 #ifdef __cplusplus
 }
 #endif
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

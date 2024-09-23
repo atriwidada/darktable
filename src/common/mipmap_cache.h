@@ -22,6 +22,8 @@
 #include "common/colorspaces.h"
 #include "common/image.h"
 
+G_BEGIN_DECLS
+
 // sizes stored in the mipmap cache, set to fixed values in mipmap_cache.c
 typedef enum dt_mipmap_size_t {
   DT_MIPMAP_0 = 0,
@@ -63,11 +65,12 @@ typedef enum dt_mipmap_get_flags_t
 typedef struct dt_mipmap_buffer_t
 {
   dt_mipmap_size_t size;
-  uint32_t imgid;
+  dt_imgid_t imgid;
   int32_t width, height;
   float iscale;
   uint8_t *buf;
   dt_colorspaces_color_profile_type_t color_space;
+  dt_imageio_retval_t loader_status;
   dt_cache_entry_t *cache_entry;
 } dt_mipmap_buffer_t;
 
@@ -117,20 +120,10 @@ void dt_mipmap_cache_print(dt_mipmap_cache_t *cache);
 void dt_mipmap_cache_get_with_caller(
     dt_mipmap_cache_t *cache,
     dt_mipmap_buffer_t *buf,
-    const uint32_t imgid,
+    const dt_imgid_t imgid,
     const dt_mipmap_size_t mip,
     const dt_mipmap_get_flags_t flags,
     const char mode,
-    const char *file,
-    int line);
-
-// convenience function with fewer params
-#define dt_mipmap_cache_write_get(A,B,C,D) dt_mipmap_cache_write_get_with_caller(A,B,C,D,__FILE__,__LINE__)
-void dt_mipmap_cache_write_get_with_caller(
-    dt_mipmap_cache_t *cache,
-    dt_mipmap_buffer_t *buf,
-    const uint32_t imgid,
-    const int mip,
     const char *file,
     int line);
 
@@ -140,12 +133,12 @@ void dt_mipmap_cache_release_with_caller(dt_mipmap_cache_t *cache, dt_mipmap_buf
                                          int line);
 
 // remove thumbnails, so they will be regenerated:
-void dt_mipmap_cache_remove(dt_mipmap_cache_t *cache, const uint32_t imgid);
-void dt_mipmap_cache_remove_at_size(dt_mipmap_cache_t *cache, const uint32_t imgid, const dt_mipmap_size_t mip);
+void dt_mipmap_cache_remove(dt_mipmap_cache_t *cache, const dt_imgid_t imgid);
+void dt_mipmap_cache_remove_at_size(dt_mipmap_cache_t *cache, const dt_imgid_t imgid, const dt_mipmap_size_t mip);
 
 // evict thumbnails from cache. They will be written to disc if not existing
-void dt_mimap_cache_evict(dt_mipmap_cache_t *cache, const uint32_t imgid);
-void dt_mipmap_cache_evict_at_size(dt_mipmap_cache_t *cache, const uint32_t imgid, const dt_mipmap_size_t mip);
+void dt_mimap_cache_evict(dt_mipmap_cache_t *cache, const dt_imgid_t imgid);
+void dt_mipmap_cache_evict_at_size(dt_mipmap_cache_t *cache, const dt_imgid_t imgid, const dt_mipmap_size_t mip);
 
 // return the closest mipmap size
 // for the given window you wish to draw.
@@ -163,10 +156,16 @@ dt_colorspaces_color_profile_type_t dt_mipmap_cache_get_colorspace();
 
 // copy over thumbnails. used by file operation that copies raw files, to speed up thumbnail generation.
 // only copies over the jpg backend on disk, doesn't directly affect the in-memory cache.
-void dt_mipmap_cache_copy_thumbnails(const dt_mipmap_cache_t *cache, const uint32_t dst_imgid, const uint32_t src_imgid);
+void dt_mipmap_cache_copy_thumbnails(const dt_mipmap_cache_t *cache, const dt_imgid_t dst_imgid, const dt_imgid_t src_imgid);
 
 // return the mipmap corresponding to text value saved in prefs
 dt_mipmap_size_t dt_mipmap_cache_get_min_mip_from_pref(const char *value);
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+
+G_END_DECLS
+
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

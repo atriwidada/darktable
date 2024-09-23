@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2009-2021 darktable developers.
+    Copyright (C) 2009-2023 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -71,7 +71,7 @@ const char *name()
   return _("color correction");
 }
 
-const char *description(struct dt_iop_module_t *self)
+const char **description(struct dt_iop_module_t *self)
 {
   return dt_iop_set_description(self, _("correct white balance selectively for blacks and whites"),
                                       _("corrective or creative"),
@@ -90,7 +90,9 @@ int default_group()
   return IOP_GROUP_COLOR | IOP_GROUP_GRADING;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_LAB;
 }
@@ -130,7 +132,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   const dt_iop_colorcorrection_data_t *const d = (dt_iop_colorcorrection_data_t *)piece->data;
   const float *const restrict in = (float *)DT_IS_ALIGNED(i);
   float *const restrict out = (float *)DT_IS_ALIGNED(o);
-  if (!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
+  if(!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
                                          in, out, roi_in, roi_out))
     return; // image has been copied through to output and module's trouble flag has been updated
 
@@ -141,11 +143,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   const float a_base = d->a_base;
   const float b_scale = d->b_scale;
   const float b_base = d->b_base;
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(roi_out, saturation, a_scale, a_base, b_scale, b_base, in, out) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < (size_t)4 * roi_out->width * roi_out->height; k += 4)
   {
     out[k] = in[k];
@@ -162,30 +160,13 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   dt_iop_colorcorrection_data_t *d = (dt_iop_colorcorrection_data_t *)piece->data;
   dt_iop_colorcorrection_global_data_t *gd = (dt_iop_colorcorrection_global_data_t *)self->global_data;
 
-  cl_int err = -999;
   const int devid = piece->pipe->devid;
-
   const int width = roi_out->width;
   const int height = roi_out->height;
 
-  size_t sizes[2] = { ROUNDUPWD(width), ROUNDUPHT(height) };
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colorcorrection, 0, sizeof(cl_mem), &dev_in);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colorcorrection, 1, sizeof(cl_mem), &dev_out);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colorcorrection, 2, sizeof(int), &width);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colorcorrection, 3, sizeof(int), &height);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colorcorrection, 4, sizeof(float), &d->saturation);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colorcorrection, 5, sizeof(float), &d->a_scale);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colorcorrection, 6, sizeof(float), &d->a_base);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colorcorrection, 7, sizeof(float), &d->b_scale);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colorcorrection, 8, sizeof(float), &d->b_base);
-  err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_colorcorrection, sizes);
-  if(err != CL_SUCCESS) goto error;
-
-  return TRUE;
-
-error:
-  dt_print(DT_DEBUG_OPENCL, "[opencl_colorcorrection] couldn't enqueue kernel! %d\n", err);
-  return FALSE;
+  return dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_colorcorrection, width, height,
+    CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(d->saturation), CLARG(d->a_scale),
+    CLARG(d->a_base), CLARG(d->b_scale), CLARG(d->b_base));
 }
 #endif
 
@@ -237,7 +218,7 @@ void gui_update(struct dt_iop_module_t *self)
   dt_iop_colorcorrection_gui_data_t *g = (dt_iop_colorcorrection_gui_data_t *)self->gui_data;
   dt_iop_colorcorrection_params_t *p = (dt_iop_colorcorrection_params_t *)self->params;
   dt_bauhaus_slider_set(g->slider, p->saturation);
-  gtk_widget_queue_draw(self->widget);
+  gtk_widget_queue_draw(GTK_WIDGET(g->area));
 }
 
 static gboolean dt_iop_colorcorrection_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data);
@@ -258,7 +239,7 @@ void gui_init(struct dt_iop_module_t *self)
 
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
-  g->area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(1.0));
+  g->area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_height(0));
   g_object_set_data(G_OBJECT(g->area), "iop-instance", self);
   dt_action_define_iop(self, NULL, N_("grid"), GTK_WIDGET(g->area), NULL);
   gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(g->area), TRUE, TRUE, 0);
@@ -413,7 +394,7 @@ static gboolean dt_iop_colorcorrection_motion_notify(GtkWidget *widget, GdkEvent
       g->selected = 2;
   }
   if(g->selected > 0) gtk_widget_grab_focus(widget);
-  gtk_widget_queue_draw(self->widget);
+  gtk_widget_queue_draw(GTK_WIDGET(g->area));
   return TRUE;
 }
 
@@ -438,7 +419,8 @@ static gboolean dt_iop_colorcorrection_button_press(GtkWidget *widget, GdkEventB
         break;
       default: // reset everything
       {
-        dt_iop_colorcorrection_params_t *d = (dt_iop_colorcorrection_params_t *)self->default_params;
+        const dt_iop_colorcorrection_params_t *const d =
+          (dt_iop_colorcorrection_params_t *)self->default_params;
         memcpy(p, d, sizeof(*p));
         dt_dev_add_history_item(darktable.develop, self, TRUE);
       }
@@ -452,7 +434,8 @@ static gboolean dt_iop_colorcorrection_leave_notify(GtkWidget *widget, GdkEventC
                                                     gpointer user_data)
 {
   dt_iop_module_t *self = (dt_iop_module_t *)user_data;
-  gtk_widget_queue_draw(self->widget);
+  dt_iop_colorcorrection_gui_data_t *g = (dt_iop_colorcorrection_gui_data_t *)self->gui_data;
+  gtk_widget_queue_draw(GTK_WIDGET(g->area));
   return TRUE;
 }
 
@@ -465,7 +448,7 @@ static gboolean dt_iop_colorcorrection_scrolled(GtkWidget *widget, GdkEventScrol
   if(dt_gui_ignore_scroll(event)) return FALSE;
 
   int delta_y;
-  if(dt_gui_get_scroll_unit_deltas(event, NULL, &delta_y))
+  if(dt_gui_get_scroll_unit_delta(event, &delta_y))
   {
      p->saturation = CLAMP(p->saturation - 0.1 * delta_y, -3.0, 3.0);
      dt_bauhaus_slider_set(g->slider, p->saturation);
@@ -531,6 +514,9 @@ static gboolean dt_iop_colorcorrection_key_press(GtkWidget *widget, GdkEventKey 
   return TRUE;
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

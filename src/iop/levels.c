@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2021 darktable developers.
+    Copyright (C) 2011-2023 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -42,7 +42,9 @@
 #include "libs/colorpicker.h"
 
 #define DT_GUI_CURVE_EDITOR_INSET DT_PIXEL_APPLY_DPI(5)
-#define DT_GUI_CURVE_INFL .3f
+// special marker value for uninitialized (and thus invalid) levels.  Use this in preference
+// to NAN so that we can enable optimizations from -ffinite-math-only.
+#define DT_LEVELS_UNINIT (-FLT_MAX)
 
 DT_MODULE_INTROSPECTION(2, dt_iop_levels_params_t)
 
@@ -86,7 +88,7 @@ typedef struct dt_iop_levels_gui_data_t
   GtkWidget *percentile_grey;
   GtkWidget *percentile_white;
   float auto_levels[3];
-  uint64_t hash;
+  dt_hash_t hash;
   GtkWidget *blackpick, *greypick, *whitepick;
 } dt_iop_levels_gui_data_t;
 
@@ -105,6 +107,11 @@ typedef struct dt_iop_levels_global_data_t
 } dt_iop_levels_global_data_t;
 
 
+const char *deprecated_msg()
+{
+  return _("this module is deprecated. please use the RGB levels module instead.");
+}
+
 const char *name()
 {
   return _("levels");
@@ -117,15 +124,17 @@ int default_group()
 
 int flags()
 {
-  return IOP_FLAGS_SUPPORTS_BLENDING;
+  return IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_DEPRECATED;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_LAB;
 }
 
-const char *description(struct dt_iop_module_t *self)
+const char **description(struct dt_iop_module_t *self)
 {
   return dt_iop_set_description(self, _("adjust black, white and mid-gray points"),
                                       _("creative"),
@@ -134,10 +143,23 @@ const char *description(struct dt_iop_module_t *self)
                                       _("non-linear, Lab, display-referred"));
 }
 
-int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,
-                  void *new_params, const int new_version)
+int legacy_params(dt_iop_module_t *self,
+                  const void *const old_params,
+                  const int old_version,
+                  void **new_params,
+                  int32_t *new_params_size,
+                  int *new_version)
 {
-  if(old_version == 1 && new_version == 2)
+  typedef struct dt_iop_levels_params_v2_t
+  {
+    dt_iop_levels_mode_t mode;
+    float black;
+    float gray;
+    float white;
+    float levels[3];
+  } dt_iop_levels_params_v2_t;
+
+  if(old_version == 1)
   {
     typedef struct dt_iop_levels_params_v1_t
     {
@@ -145,15 +167,21 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
       int levels_preset;
     } dt_iop_levels_params_v1_t;
 
-    dt_iop_levels_params_v1_t *o = (dt_iop_levels_params_v1_t *)old_params;
-    dt_iop_levels_params_t *n = (dt_iop_levels_params_t *)new_params;
-    dt_iop_levels_params_t *d = (dt_iop_levels_params_t *)self->default_params;
+    const dt_iop_levels_params_v1_t *o = (dt_iop_levels_params_v1_t *)old_params;
+    dt_iop_levels_params_v2_t *n =
+      (dt_iop_levels_params_v2_t *)malloc(sizeof(dt_iop_levels_params_v2_t));
 
-    *n = *d; // start with a fresh copy of default parameters
-
+    n->mode = LEVELS_MODE_MANUAL;
+    n->black = 0.0f;
+    n->gray = 50.0f;
+    n->white = 100.0f;
     n->levels[0] = o->levels[0];
     n->levels[1] = o->levels[1];
     n->levels[2] = o->levels[2];
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_levels_params_v2_t);
+    *new_version = 2;
     return 0;
   }
   return 1;
@@ -194,7 +222,7 @@ static void dt_iop_levels_compute_levels_automatic(dt_dev_pixelpipe_iop_t *piece
   for(int k = 0; k < 3; k++)
   {
     thr[k] = (float)total * d->percentiles[k] / 100.0f;
-    d->levels[k] = NAN;
+    d->levels[k] = DT_LEVELS_UNINIT;
   }
 
   if(piece->histogram == NULL) return;
@@ -207,19 +235,20 @@ static void dt_iop_levels_compute_levels_automatic(dt_dev_pixelpipe_iop_t *piece
 
     for(int k = 0; k < 3; k++)
     {
-      if(isnan(d->levels[k]) && (n >= thr[k]))
+      if(d->levels[k] == DT_LEVELS_UNINIT && (n >= thr[k]))
       {
         d->levels[k] = (float)i / (float)(piece->histogram_stats.bins_count - 1);
       }
     }
   }
   // for numerical reasons sometimes the threshold is sharp but in float and n is size_t.
-  // in this case we want to make sure we don't keep nan:
-  if(isnan(d->levels[2])) d->levels[2] = 1.0f;
+  // in this case we want to make sure we don't keep the marker that it is uninitialized:
+  if(d->levels[2] == DT_LEVELS_UNINIT)
+    d->levels[2] = 1.0f;
 
   // compute middle level from min and max levels
   float center = d->percentiles[1] / 100.0f;
-  if(!isnan(d->levels[0]) && !isnan(d->levels[2]))
+  if(d->levels[0] != DT_LEVELS_UNINIT && d->levels[2] != DT_LEVELS_UNINIT)
     d->levels[1] = (1.0f - center) * d->levels[0] + center * d->levels[2];
 }
 
@@ -240,7 +269,8 @@ static void compute_lut(dt_dev_pixelpipe_iop_t *piece)
   }
 }
 
-void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker, dt_dev_pixelpipe_iop_t *piece)
+void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
+                        dt_dev_pixelpipe_t *pipe)
 {
   dt_iop_levels_gui_data_t *c = (dt_iop_levels_gui_data_t *)self->gui_data;
   dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)self->params;
@@ -314,10 +344,10 @@ static void commit_params_late(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *pi
 
   if(d->mode == LEVELS_MODE_AUTOMATIC)
   {
-    if(g && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL) == DT_DEV_PIXELPIPE_FULL)
+    if(g && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL))
     {
       dt_iop_gui_enter_critical_section(self);
-      const uint64_t hash = g->hash;
+      const dt_hash_t hash = g->hash;
       dt_iop_gui_leave_critical_section(self);
 
       // note that the case 'hash == 0' on first invocation in a session implies that d->levels[]
@@ -336,16 +366,17 @@ static void commit_params_late(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *pi
       compute_lut(piece);
     }
 
-    if((piece->pipe->type & DT_DEV_PIXELPIPE_PREVIEW) == DT_DEV_PIXELPIPE_PREVIEW || isnan(d->levels[0]) || isnan(d->levels[1])
-       || isnan(d->levels[2]))
+    if((piece->pipe->type & DT_DEV_PIXELPIPE_PREVIEW)
+       || d->levels[0] == DT_LEVELS_UNINIT || d->levels[1] == DT_LEVELS_UNINIT
+       || d->levels[2] == DT_LEVELS_UNINIT)
     {
       dt_iop_levels_compute_levels_automatic(piece);
       compute_lut(piece);
     }
 
-    if(g && (piece->pipe->type & DT_DEV_PIXELPIPE_PREVIEW) == DT_DEV_PIXELPIPE_PREVIEW && d->mode == LEVELS_MODE_AUTOMATIC)
+    if(g && (piece->pipe->type & DT_DEV_PIXELPIPE_PREVIEW) && d->mode == LEVELS_MODE_AUTOMATIC)
     {
-      uint64_t hash = dt_dev_hash_plus(self->dev, piece->pipe, self->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL);
+      dt_hash_t hash = dt_dev_hash_plus(self->dev, piece->pipe, self->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL);
       dt_iop_gui_enter_critical_section(self);
       g->auto_levels[0] = d->levels[0];
       g->auto_levels[1] = d->levels[1];
@@ -356,11 +387,16 @@ static void commit_params_late(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *pi
   }
 }
 
-void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
-             const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
+void process(dt_iop_module_t *self,
+             dt_dev_pixelpipe_iop_t *piece,
+             const void *const ivoid,
+             void *const ovoid,
+             const dt_iop_roi_t *const roi_in,
+             const dt_iop_roi_t *const roi_out)
 {
-  const int ch = piece->colors;
-  assert(piece->colors >= 3);
+  if(!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
+                                        ivoid, ovoid, roi_in, roi_out))
+    return;
   const dt_iop_levels_data_t *const d = (dt_iop_levels_data_t *)piece->data;
 
   if(d->mode == LEVELS_MODE_AUTOMATIC)
@@ -371,27 +407,26 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   const float *const restrict in = (float*)ivoid;
   float *const restrict out = (float*)ovoid;
   const size_t npixels = (size_t)roi_out->width * roi_out->height;
+  const float level_black = d->levels[0];
+  const float level_range = d->levels[2] - d->levels[0];
+  const float inv_gamma = d->in_inv_gamma;
+  const float *lut = d->lut;
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(ch, d) \
-  dt_omp_sharedconst(in, out, npixels) \
-  schedule(static)
-#endif
-  for(int i = 0; i < ch * npixels; i += ch)
+  DT_OMP_FOR()
+  for(int i = 0; i < 4 * npixels; i += 4)
   {
     const float L_in = in[i] / 100.0f;
     float L_out;
-    if(L_in <= d->levels[0])
+    if(L_in <= level_black)
     {
       // Anything below the lower threshold just clips to zero
       L_out = 0.0f;
     }
     else
     {
-      const float percentage = (L_in - d->levels[0]) / (d->levels[2] - d->levels[0]);
+      const float percentage = (L_in - level_black) / level_range;
       // Within the expected input range we can use the lookup table, else we need to compute from scratch
-      L_out = percentage < 1.0f ? d->lut[(int)(percentage * 0x10000ul)] : 100.0f * powf(percentage, d->in_inv_gamma);
+      L_out = percentage < 1.0f ? lut[(int)(percentage * 0x10000ul)] : 100.0f * powf(percentage, inv_gamma);
     }
 
     // Preserving contrast
@@ -400,9 +435,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     out[i+1] = in[i+1] * L_out / denom;
     out[i+2] = in[i+2] * L_out / denom;
   }
-
-  if(piece->pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK)
-    dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
 }
 
 #ifdef HAVE_OPENCL
@@ -418,7 +450,7 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
   }
 
   cl_mem dev_lut = NULL;
-  cl_int err = -999;
+  cl_int err = DT_OPENCL_DEFAULT_ERROR;
   const int devid = piece->pipe->devid;
 
   const int width = roi_out->width;
@@ -427,26 +459,13 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
   dev_lut = dt_opencl_copy_host_to_device(devid, d->lut, 256, 256, sizeof(float));
   if(dev_lut == NULL) goto error;
 
-  size_t sizes[2] = { ROUNDUPWD(width), ROUNDUPHT(height) };
-  dt_opencl_set_kernel_arg(devid, gd->kernel_levels, 0, sizeof(cl_mem), &dev_in);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_levels, 1, sizeof(cl_mem), &dev_out);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_levels, 2, sizeof(int), &width);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_levels, 3, sizeof(int), &height);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_levels, 4, sizeof(cl_mem), &dev_lut);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_levels, 5, sizeof(float), &d->levels[0]);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_levels, 6, sizeof(float), &d->levels[2]);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_levels, 7, sizeof(float), &d->in_inv_gamma);
-  err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_levels, sizes);
-  if(err != CL_SUCCESS) goto error;
-
-  dt_opencl_release_mem_object(dev_lut);
-
-  return TRUE;
+  err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_levels, width, height,
+    CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(dev_lut), CLARG(d->levels[0]),
+    CLARG(d->levels[2]), CLARG(d->in_inv_gamma));
 
 error:
   dt_opencl_release_mem_object(dev_lut);
-  dt_print(DT_DEBUG_OPENCL, "[opencl_levels] couldn't enqueue kernel! %d\n", err);
-  return FALSE;
+  return err;
 }
 #endif
 
@@ -467,12 +486,12 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   dt_iop_levels_data_t *d = (dt_iop_levels_data_t *)piece->data;
   dt_iop_levels_params_t *p = (dt_iop_levels_params_t *)p1;
 
-  if((pipe->type & DT_DEV_PIXELPIPE_PREVIEW) == DT_DEV_PIXELPIPE_PREVIEW)
-    piece->request_histogram |= (DT_REQUEST_ON);
+  if(pipe->type & DT_DEV_PIXELPIPE_PREVIEW)
+    piece->request_histogram |= DT_REQUEST_ON;
   else
-    piece->request_histogram &= ~(DT_REQUEST_ON);
+    piece->request_histogram &= ~DT_REQUEST_ON;
 
-  piece->request_histogram |= (DT_REQUEST_ONLY_IN_GUI);
+  piece->request_histogram |= DT_REQUEST_ONLY_IN_GUI;
 
   piece->histogram_params.bins_count = 256;
 
@@ -480,10 +499,10 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   {
     d->mode = LEVELS_MODE_AUTOMATIC;
 
-    piece->request_histogram |= (DT_REQUEST_ON);
-    self->request_histogram &= ~(DT_REQUEST_ON);
+    piece->request_histogram |= DT_REQUEST_ON;
+    self->request_histogram &= ~DT_REQUEST_ON;
 
-    if(!self->dev->gui_attached) piece->request_histogram &= ~(DT_REQUEST_ONLY_IN_GUI);
+    if(!self->dev->gui_attached) piece->request_histogram &= ~DT_REQUEST_ONLY_IN_GUI;
 
     piece->histogram_params.bins_count = 16384;
 
@@ -499,9 +518,9 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
     d->percentiles[1] = p->gray;
     d->percentiles[2] = p->white;
 
-    d->levels[0] = NAN;
-    d->levels[1] = NAN;
-    d->levels[2] = NAN;
+    d->levels[0] = DT_LEVELS_UNINIT;
+    d->levels[1] = DT_LEVELS_UNINIT;
+    d->levels[2] = DT_LEVELS_UNINIT;
 
     // commit_params_late() will compute LUT later
   }
@@ -509,7 +528,7 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   {
     d->mode = LEVELS_MODE_MANUAL;
 
-    self->request_histogram |= (DT_REQUEST_ON);
+    self->request_histogram |= DT_REQUEST_ON;
 
     d->levels[0] = p->levels[0];
     d->levels[1] = p->levels[1];
@@ -554,20 +573,20 @@ void gui_update(dt_iop_module_t *self)
   gui_changed(self, g->mode, 0);
 
   dt_iop_gui_enter_critical_section(self);
-  g->auto_levels[0] = NAN;
-  g->auto_levels[1] = NAN;
-  g->auto_levels[2] = NAN;
+  g->auto_levels[0] = DT_LEVELS_UNINIT;
+  g->auto_levels[1] = DT_LEVELS_UNINIT;
+  g->auto_levels[2] = DT_LEVELS_UNINIT;
   g->hash = 0;
   dt_iop_gui_leave_critical_section(self);
 
-  gtk_widget_queue_draw(self->widget);
+  gtk_widget_queue_draw(GTK_WIDGET(g->area));
 }
 
 void init(dt_iop_module_t *module)
 {
   dt_iop_default_init(module);
 
-  module->request_histogram |= (DT_REQUEST_ON);
+  module->request_histogram |= DT_REQUEST_ON;
 
   dt_iop_levels_params_t *d = module->default_params;
 
@@ -598,9 +617,9 @@ void gui_init(dt_iop_module_t *self)
   dt_iop_levels_gui_data_t *c = IOP_GUI_ALLOC(levels);
 
   dt_iop_gui_enter_critical_section(self);
-  c->auto_levels[0] = NAN;
-  c->auto_levels[1] = NAN;
-  c->auto_levels[2] = NAN;
+  c->auto_levels[0] = DT_LEVELS_UNINIT;
+  c->auto_levels[1] = DT_LEVELS_UNINIT;
+  c->auto_levels[2] = DT_LEVELS_UNINIT;
   c->hash = 0;
   dt_iop_gui_leave_critical_section(self);
 
@@ -614,17 +633,16 @@ void gui_init(dt_iop_module_t *self)
   c->mode_stack = gtk_stack_new();
   gtk_stack_set_homogeneous(GTK_STACK(c->mode_stack),FALSE);
 
-  const float aspect = dt_conf_get_int("plugins/darkroom/levels/aspect_percent") / 100.0;
-  c->area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(aspect));
+  c->area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
+                                               0,
+                                               "plugins/darkroom/levels/graphheight"));
   GtkWidget *vbox_manual = GTK_WIDGET(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0));
   gtk_box_pack_start(GTK_BOX(vbox_manual), GTK_WIDGET(c->area), TRUE, TRUE, 0);
 
   gtk_widget_set_tooltip_text(GTK_WIDGET(c->area),_("drag handles to set black, gray, and white points. "
                                                     "operates on L channel."));
+  dt_action_define_iop(self, NULL, N_("levels"), GTK_WIDGET(c->area), NULL);
 
-  gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK
-                                             | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
-                                             | GDK_LEAVE_NOTIFY_MASK | darktable.gui->scroll_mask);
   g_signal_connect(G_OBJECT(c->area), "draw", G_CALLBACK(dt_iop_levels_area_draw), self);
   g_signal_connect(G_OBJECT(c->area), "button-press-event", G_CALLBACK(dt_iop_levels_button_press), self);
   g_signal_connect(G_OBJECT(c->area), "button-release-event", G_CALLBACK(dt_iop_levels_button_release), self);
@@ -708,7 +726,7 @@ static gboolean dt_iop_levels_area_draw(GtkWidget *widget, cairo_t *crf, gpointe
   const int inset = DT_GUI_CURVE_EDITOR_INSET;
   GtkAllocation allocation;
   gtk_widget_get_allocation(GTK_WIDGET(c->area), &allocation);
-  int width = allocation.width, height = allocation.height;
+  int width = allocation.width, height = allocation.height - DT_RESIZE_HANDLE_SIZE;
   cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
   cairo_t *cr = cairo_create(cst);
 
@@ -804,7 +822,7 @@ static gboolean dt_iop_levels_area_draw(GtkWidget *widget, cairo_t *crf, gpointe
   cairo_set_source_surface(crf, cst, 0, 0);
   cairo_paint(crf);
   cairo_surface_destroy(cst);
-  return TRUE;
+  return FALSE;
 }
 
 /**
@@ -866,7 +884,7 @@ static gboolean dt_iop_levels_motion_notify(GtkWidget *widget, GdkEventMotion *e
   const int inset = DT_GUI_CURVE_EDITOR_INSET;
   GtkAllocation allocation;
   gtk_widget_get_allocation(widget, &allocation);
-  int height = allocation.height - 2 * inset, width = allocation.width - 2 * inset;
+  int height = allocation.height - 2 * inset - DT_RESIZE_HANDLE_SIZE, width = allocation.width - 2 * inset;
   if(!c->dragging)
   {
     c->mouse_x = CLAMP(event->x - inset, 0, width);
@@ -923,7 +941,7 @@ static gboolean dt_iop_levels_button_press(GtkWidget *widget, GdkEventButton *ev
       // as drag_start_percentage is only updated when the mouse is moved.
       c->drag_start_percentage = 0.5;
       dt_dev_add_history_item(darktable.develop, self, TRUE);
-      gtk_widget_queue_draw(self->widget);
+      gtk_widget_queue_draw(GTK_WIDGET(c->area));
     }
     else
     {
@@ -955,20 +973,6 @@ static gboolean dt_iop_levels_scroll(GtkWidget *widget, GdkEventScroll *event, g
 
   if(dt_gui_ignore_scroll(event)) return FALSE;
 
-  int delta_y;
-  if(dt_gui_get_scroll_unit_deltas(event, NULL, &delta_y))
-  {
-    if(dt_modifier_is(event->state, GDK_CONTROL_MASK))
-    {
-      //adjust aspect
-      const int aspect = dt_conf_get_int("plugins/darkroom/levels/aspect_percent");
-      dt_conf_set_int("plugins/darkroom/levels/aspect_percent", aspect + delta_y);
-      dtgtk_drawing_area_set_aspect_ratio(widget, aspect / 100.0);
-
-      return TRUE;
-    }
-  }
-
   dt_iop_color_picker_reset(self, TRUE);
 
   if(c->dragging)
@@ -978,8 +982,9 @@ static gboolean dt_iop_levels_scroll(GtkWidget *widget, GdkEventScroll *event, g
 
   if(darktable.develop->gui_module != self) dt_iop_request_focus(self);
 
-  const float interval = 0.002; // Distance moved for each scroll event
-  if(dt_gui_get_scroll_unit_deltas(event, NULL, &delta_y))
+  const float interval = 0.002 * dt_accel_get_speed_multiplier(widget, event->state); // Distance moved for each scroll event
+  int delta_y;
+  if(dt_gui_get_scroll_unit_delta(event, &delta_y))
   {
     float new_position = p->levels[c->handle_move] - interval * delta_y;
     dt_iop_levels_move_handle(self, c->handle_move, new_position, p->levels, c->drag_start_percentage);
@@ -1006,6 +1011,8 @@ static void dt_iop_levels_autoadjust_callback(GtkRange *range, dt_iop_module_t *
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

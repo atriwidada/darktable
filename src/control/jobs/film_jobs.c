@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2010-2021 darktable developers.
+    Copyright (C) 2010-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -70,7 +70,7 @@ dt_job_t *dt_film_import1_create(dt_film_t *film)
     dt_control_job_dispose(job);
     return NULL;
   }
-  dt_control_job_add_progress(job, _("import images"), FALSE);
+  dt_control_job_add_progress(job, _("import images"), TRUE);
   dt_control_job_set_params(job, params, dt_film_import1_cleanup);
   params->film = film;
   dt_pthread_mutex_lock(&film->images_mutex);
@@ -82,7 +82,8 @@ dt_job_t *dt_film_import1_create(dt_film_t *film)
 static int32_t _pathlist_import_run(dt_job_t *job)
 {
   dt_film_import1_t *params = dt_control_job_get_params(job);
-  _film_import1(job, NULL, params->imagelist); // import the specified images, creating filmrolls as needed
+  if(params->imagelist)
+    _film_import1(job, NULL, params->imagelist); // import the specified images, creating filmrolls as needed
   params->imagelist = NULL;  // the import will have freed the image list
 
   // notify the user via the window manager
@@ -106,7 +107,7 @@ dt_job_t *dt_pathlist_import_create(int argc, char *argv[])
     dt_control_job_dispose(job);
     return NULL;
   }
-  dt_control_job_add_progress(job, _("import images"), FALSE);
+  dt_control_job_add_progress(job, _("import images"), TRUE);
   dt_control_job_set_params(job, params, _pathlist_import_cleanup);
   params->film = NULL;
   // now collect all of the images to be imported
@@ -123,7 +124,7 @@ dt_job_t *dt_pathlist_import_create(int argc, char *argv[])
     {
       // iterate over the directory, extracting image files
       GDir *cdir = g_dir_open(path, 0, NULL);
-      if (cdir)
+      if(cdir)
       {
         while(TRUE)
         {
@@ -229,7 +230,7 @@ static int _film_filename_cmp(gchar *a, gchar *b)
 static void _film_import1(dt_job_t *job, dt_film_t *film, GList *images)
 {
   // first, gather all images to import if not already given
-  if (!images)
+  if(!images)
   {
     const gboolean recursive = dt_conf_get_bool("ui_last/import_recursive");
 
@@ -334,7 +335,7 @@ static void _film_import1(dt_job_t *job, dt_film_t *film, GList *images)
     g_free(cdn);
 
     /* import image */
-    const int32_t imgid = dt_image_import(cfr->id, (const gchar *)image->data, FALSE, FALSE);
+    const dt_imgid_t imgid = dt_image_import(cfr->id, (const gchar *)image->data, FALSE, FALSE);
     pending++;  // we have another image which hasn't been reported yet
     fraction += 1.0 / total;
     dt_control_job_set_progress(job, fraction);
@@ -354,6 +355,8 @@ static void _film_import1(dt_job_t *job, dt_film_t *film, GList *images)
       pending = 0;
       last_update = curr_time;
     }
+    if(dt_control_job_get_state(job) == DT_JOB_STATE_CANCELLED)
+      break;
   }
 
   g_list_free_full(images, g_free);
@@ -378,6 +381,9 @@ static void _film_import1(dt_job_t *job, dt_film_t *film, GList *images)
   }
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

@@ -23,10 +23,10 @@
 // cache line will be running in lock-step as the cache line bounces back and forth between them, effectively
 // cutting throughput by a factor equal to the number of threads sharing a cache line (8 with a 64-byte cache
 // line and 32-bit ints)
-#define TEA_STATE_SIZE (MAX(64, 2*sizeof(unsigned int)))
+#define TEA_STATE_SIZE (MAX(DT_CACHELINE_BYTES, 2*sizeof(unsigned int)))
 static inline unsigned int* alloc_tea_states(size_t numthreads)
 {
-  unsigned int* states = dt_alloc_align(64, numthreads * TEA_STATE_SIZE);
+  unsigned int* states = dt_alloc_aligned(numthreads * TEA_STATE_SIZE);
   if (states) memset(states, 0, numthreads * TEA_STATE_SIZE);
   return states;
 }
@@ -72,6 +72,9 @@ static inline float tpdf(unsigned int urandom)
 }
 
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

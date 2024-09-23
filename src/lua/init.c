@@ -43,6 +43,7 @@
 #include "lua/styles.h"
 #include "lua/tags.h"
 #include "lua/types.h"
+#include "lua/util.h"
 #include "lua/view.h"
 #include "lua/widget/widget.h"
 
@@ -138,7 +139,7 @@ static lua_CFunction init_funcs[]
         dt_lua_init_luastorages,   dt_lua_init_tags,        dt_lua_init_film,     dt_lua_init_call,
         dt_lua_init_view,          dt_lua_init_events,      dt_lua_init_init,     dt_lua_init_widget,
         dt_lua_init_lualib,        dt_lua_init_gettext,     dt_lua_init_guides,   dt_lua_init_cairo,
-        dt_lua_init_password,      NULL };
+        dt_lua_init_password,      dt_lua_init_util,        NULL };
 
 
 void dt_lua_init(lua_State *L, const char *lua_command)
@@ -257,6 +258,9 @@ void dt_lua_finalize()
   darktable.lua_state.state = NULL;
   // never unlock
 }
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

@@ -83,7 +83,9 @@ static int label_member(lua_State *L)
   if(lua_gettop(L) > 2) {
     char tmp[256];
     luaA_to(L,char_256,&tmp,3);
-    dt_bauhaus_widget_set_label(combobox->widget,NULL,tmp);
+    lua_getglobal(L, "script_manager_running_script");
+    DT_BAUHAUS_WIDGET(combobox->widget)->module = &darktable.control->actions_lua;
+    dt_bauhaus_widget_set_label(combobox->widget,lua_tolstring(L,-1,NULL),tmp);
     return 0;
   }
   lua_pushstring(L,dt_bauhaus_widget_get_label(combobox->widget));
@@ -201,6 +203,9 @@ int dt_lua_init_widget_combobox(lua_State* L)
 
   return 0;
 }
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

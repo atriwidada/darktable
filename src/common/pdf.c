@@ -1,6 +1,6 @@
 /*
  *    This file is part of darktable,
- *    Copyright (C) 2015-2020 darktable developers.
+ *    Copyright (C) 2015-2024 darktable developers.
  *
  *    darktable is free software: you can redistribute it and/or modify
  *    it under the terms of the GNU General Public License as published by
@@ -81,7 +81,7 @@ int dt_pdf_parse_length(const char *str, float *length)
   }
 
   // we don't want NAN, INF or parse errors (== 0.0)
-  if(!isnormal(*length))
+  if(!dt_isnormal(*length))
     goto end;
 
   SKIP_SPACES(endptr);
@@ -131,7 +131,7 @@ int dt_pdf_parse_paper_size(const char *str, float *width, float *height)
 
   *width =  g_ascii_strtod(nptr, &endptr);
 
-  if(endptr == NULL || *endptr == '\0' || errno == ERANGE || !isnormal(*width))
+  if(endptr == NULL || *endptr == '\0' || errno == ERANGE || !dt_isnormal(*width))
     goto end;
 
   nptr = endptr;
@@ -163,7 +163,7 @@ int dt_pdf_parse_paper_size(const char *str, float *width, float *height)
 
   *height =  g_ascii_strtod(nptr, &endptr);
 
-  if(endptr == NULL || *endptr == '\0' || errno == ERANGE || !isnormal(*height))
+  if(endptr == NULL || *endptr == '\0' || errno == ERANGE || !dt_isnormal(*height))
     goto end;
 
   nptr = endptr;
@@ -301,7 +301,6 @@ static size_t _pdf_write_stream(dt_pdf_t *pdf, dt_pdf_stream_encoder_t encoder, 
       stream_size = _pdf_stream_encoder_Flate(pdf, data, len);
       break;
   }
-  pdf->bytes_written += stream_size;
   return stream_size;
 }
 
@@ -309,7 +308,7 @@ int dt_pdf_add_icc(dt_pdf_t *pdf, const char *filename)
 {
   size_t len;
   unsigned char *data = (unsigned char *)dt_read_file(filename, &len);
-  if (data)
+  if(data)
   {
     int icc_id = dt_pdf_add_icc_from_data(pdf, data, len);
     free(data);
@@ -798,9 +797,7 @@ float * read_ppm(const char * filename, int * wd, int * ht)
       return NULL;
     }
     // and transform it into 0..1 range
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static) default(none) shared(image, tmp, width, height, max)
-    #endif
+    DT_OMP_FOR()
     for(int i = 0; i < width * height * 3; i++)
       image[i] = (float)tmp[i] / max;
     free(tmp);
@@ -819,15 +816,11 @@ float * read_ppm(const char * filename, int * wd, int * ht)
       return NULL;
     }
     // swap byte order
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static) default(none) shared(tmp, width, height)
-    #endif
+    DT_OMP_FOR()
     for(int k = 0; k < 3 * width * height; k++)
       tmp[k] = ((tmp[k] & 0xff) << 8) | (tmp[k] >> 8);
     // and transform it into 0..1 range
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static) default(none) shared(image, tmp, max, width, height)
-    #endif
+    DT_OMP_FOR()
     for(int i = 0; i < width * height * 3; i++)
       image[i] = (float)tmp[i] / max;
     free(tmp);
@@ -881,9 +874,7 @@ int main(int argc, char *argv[])
       exit(1);
     }
 
-#ifdef _OPENMP
-  #pragma omp parallel for schedule(static) default(none) shared(image, data, width, height)
-#endif
+    DT_OMP_FOR()
     for(int i = 0; i < width * height * 3; i++)
       data[i] = CLIP(image[i]) * 65535;
 
@@ -939,6 +930,9 @@ int main(int argc, char *argv[])
 
 #endif // STANDALONE
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

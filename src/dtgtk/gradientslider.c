@@ -71,7 +71,7 @@ static gboolean _gradient_slider_postponed_value_change(gpointer data)
   if(!DTGTK_GRADIENT_SLIDER(data)->is_dragging) DTGTK_GRADIENT_SLIDER(data)->timeout_handle = 0;
   else
   {
-    const int delay = CLAMP(darktable.develop->average_delay * 3 / 2,
+    const int delay = CLAMP(darktable.develop->full.pipe->average_delay * 3 / 2,
                             DTGTK_GRADIENT_SLIDER_VALUE_CHANGED_DELAY_MIN,
                             DTGTK_GRADIENT_SLIDER_VALUE_CHANGED_DELAY_MAX);
     DTGTK_GRADIENT_SLIDER(data)->timeout_handle = g_timeout_add(delay, _gradient_slider_postponed_value_change, data);
@@ -309,7 +309,7 @@ static gboolean _gradient_slider_button_press(GtkWidget *widget, GdkEventButton 
       gslider->is_changed = TRUE;
       gslider->is_dragging = TRUE;
       // timeout_handle should always be zero here, but check just in case
-      const int delay = CLAMP(darktable.develop->average_delay * 3 / 2,
+      const int delay = CLAMP(darktable.develop->full.pipe->average_delay * 3 / 2,
                               DTGTK_GRADIENT_SLIDER_VALUE_CHANGED_DELAY_MIN,
                               DTGTK_GRADIENT_SLIDER_VALUE_CHANGED_DELAY_MAX);
       if(!gslider->timeout_handle)
@@ -600,7 +600,7 @@ static gboolean _gradient_slider_draw(GtkWidget *widget, cairo_t *cr)
   cairo_set_source_rgba(cr, color.red, color.green, color.blue, 1.0);
 
   // do we have a picker value to draw?
-  if(!isnan(gslider->picker[0]))
+  if(!dt_isnan(gslider->picker[0]))
   {
     int vx_min = _scale_to_screen(widget, CLAMP(gslider->picker[1], 0.0, 1.0));
     int vx_max = _scale_to_screen(widget, CLAMP(gslider->picker[2], 0.0, 1.0));
@@ -695,17 +695,14 @@ GtkWidget *dtgtk_gradient_slider_multivalue_new(gint positions)
   gslider = g_object_new(_gradient_slider_get_type(), NULL);
   gslider->positions = positions;
   _gradient_slider_set_defaults(gslider);
-
-  GtkStyleContext *context = gtk_widget_get_style_context(GTK_WIDGET(gslider));
-  gtk_style_context_add_class(context, "dt_gslider_multivalue");
-
+  dt_gui_add_class(GTK_WIDGET(gslider), "dt_gslider_multivalue");
   return (GtkWidget *)gslider;
 }
 
 GtkWidget *dtgtk_gradient_slider_multivalue_new_with_name(gint positions, gchar *name)
 {
   GtkWidget *widget = GTK_WIDGET(dtgtk_gradient_slider_multivalue_new(positions));
-  if (name) gtk_widget_set_name(widget, name);
+  if(name) gtk_widget_set_name(widget, name);
 
   return widget;
 }
@@ -730,17 +727,14 @@ GtkWidget *dtgtk_gradient_slider_multivalue_new_with_color(GdkRGBA start, GdkRGB
   gc->position = 1.0;
   memcpy(&gc->color, &end, sizeof(GdkRGBA));
   gslider->colors = g_list_append(gslider->colors, gc);
-
-  GtkStyleContext *context = gtk_widget_get_style_context(GTK_WIDGET(gslider));
-  gtk_style_context_add_class(context, "dt_gslider_multivalue");
-
+  dt_gui_add_class(GTK_WIDGET(gslider), "dt_gslider_multivalue");
   return (GtkWidget *)gslider;
 }
 
 GtkWidget *dtgtk_gradient_slider_multivalue_new_with_color_and_name(GdkRGBA start, GdkRGBA end, gint positions, gchar *name)
 {
   GtkWidget *widget = GTK_WIDGET(dtgtk_gradient_slider_multivalue_new_with_color(start, end, positions));
-  if (name) gtk_widget_set_name(widget, name);
+  if(name) gtk_widget_set_name(widget, name);
 
   return widget;
 }
@@ -919,17 +913,14 @@ void dtgtk_gradient_slider_multivalue_set_scale_callback(GtkDarktableGradientSli
 GtkWidget *dtgtk_gradient_slider_new()
 {
   GtkWidget *gslider = dtgtk_gradient_slider_multivalue_new(1);
-
-  GtkStyleContext *context = gtk_widget_get_style_context(gslider);
-  gtk_style_context_add_class(context, "dt_gslider");
-
+  dt_gui_add_class(gslider, "dt_gslider");
   return gslider;
 }
 
 GtkWidget *dtgtk_gradient_slider_new_with_name(gchar *name)
 {
   GtkWidget *widget = GTK_WIDGET(dtgtk_gradient_slider_new());
-  if (name) gtk_widget_set_name(widget, name);
+  if(name) gtk_widget_set_name(widget, name);
 
   return widget;
 }
@@ -937,17 +928,14 @@ GtkWidget *dtgtk_gradient_slider_new_with_name(gchar *name)
 GtkWidget *dtgtk_gradient_slider_new_with_color(GdkRGBA start, GdkRGBA end)
 {
   GtkWidget *gslider = dtgtk_gradient_slider_multivalue_new_with_color(start, end, 1);
-
-  GtkStyleContext *context = gtk_widget_get_style_context(gslider);
-  gtk_style_context_add_class(context, "dt_gslider");
-
+  dt_gui_add_class(gslider, "dt_gslider");
   return gslider;
 }
 
 GtkWidget *dtgtk_gradient_slider_new_with_color_and_name(GdkRGBA start, GdkRGBA end, gchar *name)
 {
   GtkWidget *widget = GTK_WIDGET(dtgtk_gradient_slider_new_with_color(start, end));
-  if (name) gtk_widget_set_name(widget, name);
+  if(name) gtk_widget_set_name(widget, name);
 
   return widget;
 }
@@ -1018,6 +1006,9 @@ void dtgtk_gradient_slider_set_increment(GtkDarktableGradientSlider *gslider, gd
 }
 
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

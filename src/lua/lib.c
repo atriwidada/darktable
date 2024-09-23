@@ -121,6 +121,33 @@ static int views_member(lua_State*L)
   return 1;
 }
 
+static int active_preset_member(lua_State *L)
+{
+  dt_lib_module_t * module = *(dt_lib_module_t**)lua_touserdata(L, 1);
+  lua_newtable(L);
+  gchar *preset_name;
+
+  dt_lib_module_info_t *mi =
+    (dt_lib_module_info_t *)calloc(1, sizeof(dt_lib_module_info_t));
+
+  mi->plugin_name = g_strdup(module->plugin_name);
+  mi->version = module->version();
+  mi->module = module;
+  mi->params = module->get_params ? module->get_params(module, &mi->params_size) : NULL;
+  if(!mi->params)
+  {
+    // this is a valid case, for example in location.c when nothing got selected
+    // fprintf(stderr, "something went wrong: &params=%p, size=%i\n",
+    //         mi->params, mi->params_size);
+    mi->params_size = 0;
+  }
+
+  preset_name = dt_lib_get_active_preset_name(mi);
+  lua_pushstring(L, preset_name);
+  free(mi);
+  return 1;
+}
+
 static int lib_reset(lua_State *L)
 {
   dt_lib_module_t *module = *(dt_lib_module_t **)lua_touserdata(L, 1);
@@ -189,6 +216,8 @@ int dt_lua_init_early_lib(lua_State *L)
   dt_lua_type_register_const(L, dt_lua_lib_t, "container");
   lua_pushcfunction(L, views_member);
   dt_lua_type_register_const(L, dt_lua_lib_t, "views");
+  lua_pushcfunction(L, active_preset_member);
+  dt_lua_type_register_const(L, dt_lua_lib_t, "active_preset");
   lua_pushcfunction(L, visible_member);
   dt_lua_gtk_wrap(L);
   dt_lua_type_register(L, dt_lua_lib_t, "visible");
@@ -198,6 +227,9 @@ int dt_lua_init_early_lib(lua_State *L)
   dt_lua_module_new(L, "lib"); // special case : will be attached to dt.gui in lua/gui.c:dt_lua_init_gui
   return 0;
 }
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

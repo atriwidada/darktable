@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2019-2020 darktable developers.
+    Copyright (C) 2019-2023 darktable developers.
 
 
     darktable is free software: you can redistribute it and/or modify
@@ -19,7 +19,6 @@
 #include "bauhaus/bauhaus.h"
 #include "common/darktable.h"
 #include "common/debug.h"
-#include "common/imageio_module.h"
 #include "control/conf.h"
 #include "control/control.h"
 #include "control/signal.h"
@@ -27,6 +26,7 @@
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
 #include "gui/gtkentry.h"
+#include "imageio/imageio_module.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
 #ifdef GDK_WINDOWING_QUARTZ
@@ -66,14 +66,14 @@ static gboolean _find_metadata_iter_per_text(GtkTreeModel *model, GtkTreeIter *i
   GtkTreeIter it;
   gboolean valid = gtk_tree_model_get_iter_first(model, &it);
   char *name;
-  while (valid)
+  while(valid)
   {
     gtk_tree_model_get(model, &it, col, &name, -1);
     const gboolean found = g_strcmp0(text, name) == 0;
     g_free(name);
     if(found)
     {
-      if (iter) *iter = it;
+      if(iter) *iter = it;
       return TRUE;
     }
     valid = gtk_tree_model_iter_next(model, &it);
@@ -91,7 +91,7 @@ static void _add_selected_metadata(GtkTreeView *view, dt_lib_export_metadata_t *
   {
     char *tagname;
     gtk_tree_model_get(model, &iter, DT_LIB_EXPORT_METADATA_COL_XMP, &tagname, -1);
-    if (!_find_metadata_iter_per_text(GTK_TREE_MODEL(d->liststore), NULL, DT_LIB_EXPORT_METADATA_COL_XMP, tagname))
+    if(!_find_metadata_iter_per_text(GTK_TREE_MODEL(d->liststore), NULL, DT_LIB_EXPORT_METADATA_COL_XMP, tagname))
     {
       gtk_list_store_append(d->liststore, &iter);
       gtk_list_store_set(d->liststore, &iter, DT_LIB_EXPORT_METADATA_COL_XMP, tagname,
@@ -104,27 +104,12 @@ static void _add_selected_metadata(GtkTreeView *view, dt_lib_export_metadata_t *
 }
 
 // choice of a metadata tag
-static gboolean _click_on_metadata_list(GtkWidget *view, GdkEventButton *event, dt_lib_export_metadata_t *d)
+static void _metadata_activated(GtkTreeView *tree_view,
+                                GtkTreePath *path,
+                                GtkTreeViewColumn *column,
+                                dt_lib_export_metadata_t *d)
 {
-  if(event->type == GDK_2BUTTON_PRESS && event->button == 1)
-  {
-
-    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(view));
-    GtkTreePath *path = NULL;
-    // Get tree path for row that was clicked
-    if(gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(view), (gint)event->x, (gint)event->y, &path, NULL, NULL, NULL))
-    {
-      gtk_tree_selection_select_path(selection, path);
-      if(event->type == GDK_2BUTTON_PRESS && event->button == 1)
-      {
-        _add_selected_metadata(GTK_TREE_VIEW(view), d);
-        gtk_tree_path_free(path);
-        return TRUE;
-      }
-    }
-    gtk_tree_path_free(path);
-  }
-  return FALSE;
+  _add_selected_metadata(tree_view, d);
 }
 
 // routine to set individual visibility flag
@@ -133,7 +118,7 @@ static gboolean _set_matching_tag_visibility(GtkTreeModel *model, GtkTreePath *p
   gboolean visible;
   gchar *tagname = NULL;
   gtk_tree_model_get(model, iter, DT_LIB_EXPORT_METADATA_COL_XMP, &tagname, -1);
-  if (!d->sel_entry_text[0])
+  if(!d->sel_entry_text[0])
     visible = TRUE;
   else
   {
@@ -160,24 +145,26 @@ static void _tag_name_changed(GtkEntry *entry, dt_lib_export_metadata_t *d)
 // dialog to add metadata tag into the formula list
 static void _add_tag_button_clicked(GtkButton *button, dt_lib_export_metadata_t *d)
 {
-  GtkWidget *dialog = gtk_dialog_new_with_buttons(_("select tag"), GTK_WINDOW(d->dialog), GTK_DIALOG_DESTROY_WITH_PARENT,
-                                       _("add"), GTK_RESPONSE_ACCEPT, _("done"), GTK_RESPONSE_NONE, NULL);
-  g_signal_connect(dialog, "key-press-event", G_CALLBACK(dt_handle_dialog_enter), NULL);
-  gtk_window_set_default_size(GTK_WINDOW(dialog), 300, -1);
+  GtkWidget *dialog = gtk_dialog_new_with_buttons(_("select tag"), GTK_WINDOW(d->dialog),
+                                                  GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                  _("_add"), GTK_RESPONSE_ACCEPT,
+                                                  _("_done"), GTK_RESPONSE_NONE, NULL);
+  gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_NONE);
+  gtk_window_set_default_size(GTK_WINDOW(dialog), DT_PIXEL_APPLY_DPI(500), DT_PIXEL_APPLY_DPI(300));
   GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
   GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
   gtk_container_set_border_width(GTK_CONTAINER(vbox), 8);
-  gtk_container_add(GTK_CONTAINER(area), vbox);
+  gtk_box_pack_start(GTK_BOX(area), vbox, TRUE, TRUE, 0);
 
   GtkWidget *entry = gtk_entry_new();
   d->sel_entry = entry;
   gtk_entry_set_text(GTK_ENTRY(entry), "");
   gtk_widget_set_tooltip_text(entry, _("list filter"));
-  gtk_box_pack_start(GTK_BOX(vbox), entry, TRUE, TRUE, 0);
+  gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+  gtk_box_pack_start(GTK_BOX(vbox), entry, FALSE, TRUE, 0);
   g_signal_connect(G_OBJECT(entry), "changed", G_CALLBACK(_tag_name_changed), d);
 
   GtkWidget *w = gtk_scrolled_window_new(NULL, NULL);
-  gtk_widget_set_size_request(w, DT_PIXEL_APPLY_DPI(500), DT_PIXEL_APPLY_DPI(300));
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(w), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
   gtk_box_pack_start(GTK_BOX(vbox), w, TRUE, TRUE, 0);
   GtkTreeView *view = GTK_TREE_VIEW(gtk_tree_view_new());
@@ -219,13 +206,13 @@ static void _add_tag_button_clicked(GtkButton *button, dt_lib_export_metadata_t 
   gtk_tree_sortable_set_sort_column_id(GTK_TREE_SORTABLE(liststore), DT_LIB_EXPORT_METADATA_COL_XMP, GTK_SORT_ASCENDING);
   gtk_tree_view_set_model(view, model);
   g_object_unref(model);
-  g_signal_connect(G_OBJECT(view), "button-press-event", G_CALLBACK(_click_on_metadata_list), (gpointer)d);
+  g_signal_connect(G_OBJECT(view), "row-activated", G_CALLBACK(_metadata_activated), d);
 
   #ifdef GDK_WINDOWING_QUARTZ
     dt_osx_disallow_fullscreen(dialog);
   #endif
     gtk_widget_show_all(dialog);
-  while (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT)
+  while(gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT)
   {
     _add_selected_metadata(view, d);
   }
@@ -269,7 +256,7 @@ static void _tags_toggled(GtkToggleButton *dttag, dt_lib_export_metadata_t *d)
 static void _formula_edited(GtkCellRenderer *renderer, gchar *path, gchar *new_text, dt_lib_export_metadata_t *d)
 {
   GtkTreeIter iter;
-  if (gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(d->liststore), &iter, path))
+  if(gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(d->liststore), &iter, path))
     gtk_list_store_set(d->liststore, &iter, DT_LIB_EXPORT_METADATA_COL_FORMULA, new_text, -1);
 }
 
@@ -284,16 +271,20 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
   dt_lib_export_metadata_t *d = calloc(1, sizeof(dt_lib_export_metadata_t));
 
   GtkWidget *win = dt_ui_main_window(darktable.gui->ui);
-  GtkWidget *dialog = gtk_dialog_new_with_buttons(_("edit metadata exportation"), GTK_WINDOW(win), GTK_DIALOG_DESTROY_WITH_PARENT,
-                                       _("cancel"), GTK_RESPONSE_NONE, _("save"), GTK_RESPONSE_ACCEPT, NULL);
-  d->dialog = dialog;
-  g_signal_connect(dialog, "key-press-event", G_CALLBACK(dt_handle_dialog_enter), NULL);
+  GtkWidget *dialog = gtk_dialog_new_with_buttons(_("edit metadata exportation"), GTK_WINDOW(win),
+                                                  GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                  _("_cancel"), GTK_RESPONSE_NONE,
+                                                  _("_save"), GTK_RESPONSE_ACCEPT, NULL);
+  gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
+  dt_gui_dialog_add_help(GTK_DIALOG(dialog), "export_dialog");
 
-  gtk_window_set_default_size(GTK_WINDOW(dialog), 300, -1);
+  d->dialog = dialog;
+
+  gtk_window_set_default_size(GTK_WINDOW(dialog), DT_PIXEL_APPLY_DPI(500), -1);
   GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
 
   GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_container_add(GTK_CONTAINER(area), hbox);
+  gtk_box_pack_start(GTK_BOX(area), hbox, TRUE, TRUE, 0);
 
   // general info
   GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
@@ -304,15 +295,15 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
   GtkWidget *vbox2 = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_pack_start(GTK_BOX(vbox), vbox2, FALSE, TRUE, 0);
 
-  GtkWidget *exiftag = gtk_check_button_new_with_label(_("exif data"));
-  gtk_widget_set_tooltip_text(exiftag, _("export exif metadata"));
+  GtkWidget *exiftag = gtk_check_button_new_with_label(_("EXIF data"));
+  gtk_widget_set_tooltip_text(exiftag, _("export EXIF metadata"));
   gtk_box_pack_start(GTK_BOX(vbox2), exiftag, FALSE, TRUE, 0);
   GtkWidget *dtmetadata = gtk_check_button_new_with_label(_("metadata"));
-  gtk_widget_set_tooltip_text(dtmetadata, _("export dt xmp metadata (from metadata editor module)"));
+  gtk_widget_set_tooltip_text(dtmetadata, _("export darktable XMP metadata (from metadata editor module)"));
   gtk_box_pack_start(GTK_BOX(vbox2), dtmetadata, FALSE, TRUE, 0);
 
   GtkWidget *calculated;
-  if (!ondisk)
+  if(!ondisk)
   {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_box_pack_start(GTK_BOX(vbox2), box, FALSE, TRUE, 0);
@@ -320,8 +311,8 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
     gtk_box_pack_start(GTK_BOX(box), vbox3, FALSE, TRUE, 10);
     calculated = gtk_check_button_new_with_label(_("only embedded"));
     gtk_widget_set_tooltip_text(calculated, _("per default the interface sends some (limited) metadata beside the image to remote storage.\n"
-        "to avoid this and let only image embedded dt xmp metadata, check this flag.\n"
-        "if remote storage doesn't understand dt xmp metadata, you can use calculated metadata instead"));
+        "to avoid this and let only image embedded darktable XMP metadata, check this flag.\n"
+        "if remote storage doesn't understand darktable XMP metadata, you can use calculated metadata instead"));
     gtk_box_pack_start(GTK_BOX(vbox3), calculated, FALSE, TRUE, 0);
   }
 
@@ -351,7 +342,7 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
   gtk_widget_set_tooltip_text(hierarchical, _("export hierarchical tags (to Xmp.lr.Hierarchical Subject)"));
   gtk_box_pack_start(GTK_BOX(vbox2), hierarchical, FALSE, TRUE, 0);
   GtkWidget *dthistory = gtk_check_button_new_with_label(_("develop history"));
-  gtk_widget_set_tooltip_text(dthistory, _("export dt development data (recovery purpose in case of loss of database or xmp file)"));
+  gtk_widget_set_tooltip_text(dthistory, _("export darktable development data (recovery purpose in case of loss of database or XMP file)"));
   gtk_box_pack_start(GTK_BOX(vbox2), dthistory, FALSE, TRUE, 0);
 
   // specific rules
@@ -362,7 +353,6 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
   gtk_box_pack_start(GTK_BOX(vbox), label, FALSE, TRUE, 0);
 
   GtkWidget *w = gtk_scrolled_window_new(NULL, NULL);
-  gtk_widget_set_size_request(w, DT_PIXEL_APPLY_DPI(450), DT_PIXEL_APPLY_DPI(100));
   gtk_widget_set_hexpand(w, TRUE);
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(w), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
   gtk_box_pack_start(GTK_BOX(vbox), w, TRUE, TRUE, 0);
@@ -383,7 +373,7 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
                 _("list of calculated metadata\n"
                 "click on '+' button to select and add new metadata\n"
                 "if formula is empty, the corresponding metadata is removed from exported file,\n"
-                "if formula is \'=\', the exif metadata is exported even if exif data are disabled\n"
+                "if formula is \'=\', the EXIF metadata is exported even if EXIF data are disabled\n"
                 "otherwise the corresponding metadata is calculated and added to exported file\n"
                 "click on formula cell to edit\n"
                 "type '$(' to activate the completion and see the list of variables"));
@@ -397,20 +387,20 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
   d->taglist = (GList *)dt_exif_get_exiv2_taglist();
   GList *list = dt_util_str_to_glist("\1", metadata_presets);
   int32_t flags = 0;
-  if (list)
+  if(!g_list_is_empty(list))
   {
     char *flags_hexa = list->data;
     flags = strtol(flags_hexa, NULL, 16);
     list = g_list_remove(list, flags_hexa);
     g_free(flags_hexa);
-    if (list)
+    if(!g_list_is_empty(list))
     {
-      for (GList *tags = list; tags; tags = g_list_next(tags))
+      for(GList *tags = list; tags; tags = g_list_next(tags))
       {
         GtkTreeIter iter;
         const char *tagname = (char *)tags->data;
         tags = g_list_next(tags);
-        if (!tags) break;
+        if(!tags) break;
         const char *formula = (char *)tags->data;
         gtk_list_store_append(d->liststore, &iter);
         gtk_list_store_set(d->liststore, &iter, DT_LIB_EXPORT_METADATA_COL_XMP, tagname,
@@ -430,18 +420,18 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
   _tags_toggled(GTK_TOGGLE_BUTTON(dttag), d);
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(hierarchical), flags & DT_META_HIERARCHICAL_TAG);
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(dthistory), flags & DT_META_DT_HISTORY);
-  if (!ondisk)
+  if(!ondisk)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(calculated), flags & DT_META_CALCULATED);
 
   box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_box_pack_start(GTK_BOX(vbox), box, FALSE, TRUE, 0);
 
-  GtkWidget *button = dtgtk_button_new(dtgtk_cairo_paint_plus_simple, CPF_STYLE_FLAT, NULL);
+  GtkWidget *button = dtgtk_button_new(dtgtk_cairo_paint_plus_simple, 0, NULL);
   gtk_widget_set_tooltip_text(button, _("add an output metadata tag"));
   gtk_box_pack_end(GTK_BOX(box), button, FALSE, TRUE, 0);
   g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(_add_tag_button_clicked), (gpointer)d);
 
-  button = dtgtk_button_new(dtgtk_cairo_paint_minus_simple, CPF_STYLE_FLAT, NULL);
+  button = dtgtk_button_new(dtgtk_cairo_paint_minus_simple, 0, NULL);
   gtk_widget_set_tooltip_text(button, _("delete metadata tag"));
   gtk_box_pack_end(GTK_BOX(box), button, FALSE, TRUE, 0);
   g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(_delete_tag_button_clicked), (gpointer)d);
@@ -452,7 +442,7 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
   gtk_widget_show_all(dialog);
 
   char *newlist = metadata_presets;
-  if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT)
+  if(gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT)
   {
     const gint newflags = (
                     (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(exiftag)) ? DT_META_EXIF : 0) |
@@ -489,6 +479,8 @@ char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const 
   return newlist;
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

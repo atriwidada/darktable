@@ -1,6 +1,6 @@
 /*
    This file is part of darktable,
-   Copyright (C) 2013-2021 darktable developers.
+   Copyright (C) 2013-2024 darktable developers.
 
    darktable is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -35,16 +35,35 @@
 
 int dt_lua_duplicate_image(lua_State *L)
 {
-  int imgid;
+  dt_imgid_t imgid;
   luaA_to(L, dt_lua_image_t, &imgid, -1);
   imgid = dt_image_duplicate(imgid);
   luaA_push(L, dt_lua_image_t, &imgid);
   return 1;
 }
 
+int dt_lua_duplicate_image_with_history(lua_State *L)
+{
+  dt_imgid_t imgid;
+  dt_imgid_t newid;
+  luaA_to(L, dt_lua_image_t, &imgid, -1);
+  newid = dt_image_duplicate(imgid);
+  if(!dt_is_valid_imgid(newid))
+  {
+    luaA_push(L, dt_lua_image_t, &imgid);
+    return 1;
+  }
+  else
+  {
+    dt_history_copy_and_paste_on_image(imgid, newid, FALSE, NULL, TRUE, TRUE, TRUE);
+    luaA_push(L, dt_lua_image_t, &newid);
+    return 1;
+  }
+}
+
 int dt_lua_delete_image(lua_State *L)
 {
-  int imgid;
+  dt_imgid_t imgid;
   luaA_to(L, dt_lua_image_t, &imgid, -1);
   dt_image_remove(imgid);
   return 0;
@@ -52,7 +71,7 @@ int dt_lua_delete_image(lua_State *L)
 
 int dt_lua_move_image(lua_State *L)
 {
-  dt_lua_image_t imgid = -1;
+  dt_lua_image_t imgid = NO_IMGID;
   dt_lua_film_t filmid = -1;
   if(luaL_testudata(L, 1, "dt_lua_image_t"))
   {
@@ -78,7 +97,7 @@ int dt_lua_move_image(lua_State *L)
 
 int dt_lua_copy_image(lua_State *L)
 {
-  dt_lua_image_t imgid = -1;
+  dt_lua_image_t imgid = NO_IMGID;
   dt_lua_film_t filmid = -1;
   if(luaL_testudata(L, 1, "dt_lua_image_t"))
   {
@@ -108,7 +127,7 @@ int dt_lua_copy_image(lua_State *L)
 static int import_images(lua_State *L)
 {
   char *full_name = g_realpath(luaL_checkstring(L, -1));
-  int result;
+  dt_filmid_t result;
 
   if(!full_name || !g_file_test(full_name, G_FILE_TEST_EXISTS))
   {
@@ -118,7 +137,7 @@ static int import_images(lua_State *L)
   else if(g_file_test(full_name, G_FILE_TEST_IS_DIR))
   {
     result = dt_film_import(full_name);
-    if(result == 0)
+    if(!dt_is_valid_filmid(result))
     {
       g_free(full_name);
       return luaL_error(L, "error while importing");
@@ -141,7 +160,7 @@ static int import_images(lua_State *L)
     }
     result = dt_film_new(&new_film, final_path);
     g_free(final_path);
-    if(result == 0)
+    if(!dt_is_valid_filmid(result))
     {
       if(dt_film_is_empty(new_film.id)) dt_film_remove(new_film.id);
       dt_film_cleanup(&new_film);
@@ -152,7 +171,7 @@ static int import_images(lua_State *L)
     result = dt_image_import_lua(new_film.id, full_name, TRUE);
     if(dt_film_is_empty(new_film.id)) dt_film_remove(new_film.id);
     dt_film_cleanup(&new_film);
-    if(result == 0)
+    if(!dt_is_valid_filmid(result))
     {
       g_free(full_name);
       return luaL_error(L, "error while importing");
@@ -195,7 +214,7 @@ static int database_numindex(lua_State *L)
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
   if(sqlite3_step(stmt) == SQLITE_ROW)
   {
-    int imgid = sqlite3_column_int(stmt, 0);
+    dt_imgid_t imgid = sqlite3_column_int(stmt, 0);
     luaA_push(L, dt_lua_image_t, &imgid);
   }
   else
@@ -219,7 +238,7 @@ static int database_get_image(lua_State *L)
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
   if(sqlite3_step(stmt) == SQLITE_ROW)
   {
-    int imgid = sqlite3_column_int(stmt, 0);
+    dt_imgid_t imgid = sqlite3_column_int(stmt, 0);
     luaA_push(L, dt_lua_image_t, &imgid);
   }
   else
@@ -242,8 +261,8 @@ static int collection_numindex(lua_State *L)
   {
     return luaL_error(L, "incorrect index in database");
   }
-  int imgid = dt_collection_get_nth(darktable.collection,index-1);
-  if (imgid >0)
+  dt_imgid_t imgid = dt_collection_get_nth(darktable.collection,index-1);
+  if(imgid >0)
   {
     luaA_push(L, dt_lua_image_t, &imgid);
   } else {
@@ -318,6 +337,9 @@ int dt_lua_init_database(lua_State *L)
   return 0;
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

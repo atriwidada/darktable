@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2010-2021 darktable developers.
+    Copyright (C) 2010-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -22,6 +22,7 @@
 #include "common/file_location.h"
 #include "common/grealpath.h"
 #include "common/utility.h"
+#include "control/conf.h"
 #include "gui/gtk.h"
 
 /* getpwnam_r availability check */
@@ -54,6 +55,39 @@
 #ifndef RSVG_CAIRO_H
 #include <librsvg/rsvg-cairo.h>
 #endif
+
+const char *dt_util_localize_string(const char *s)
+{
+  // check whether the string starts with the magic tag to request localization
+  static const char prefix[] = "_l10n_";
+  static const int prefix_len = sizeof(prefix)-1;
+
+  if(s && strncmp(s, prefix, prefix_len) == 0)
+    return _(s+prefix_len);
+  else
+    return s;
+}
+
+gchar *dt_util_localize_segmented_name(const char *s)
+{
+  gchar **split = g_strsplit(s, "|", 0);
+  gchar *localized = NULL;
+  if (split && split[0])
+  {
+    gsize loc_len = 1 + strlen(dt_util_localize_string(split[0]));
+    for(int i = 1; split[i] != NULL; i++)
+      loc_len += strlen(dt_util_localize_string(split[i])) + strlen(" | ");
+    localized = g_new0(gchar, loc_len);
+    gchar *end = g_stpcpy(localized, dt_util_localize_string(split[0]));
+    for(int i = 1; split[i] != NULL; i++)
+    {
+      end = g_stpcpy(end, " | ");
+      end = g_stpcpy(end, dt_util_localize_string(split[i]));
+    }
+  }
+  g_strfreev(split);
+  return localized;
+}
 
 gchar *dt_util_dstrcat(gchar *str, const gchar *format, ...)
 {
@@ -94,6 +128,27 @@ guint dt_util_str_occurence(const gchar *haystack, const gchar *needle)
     }
   }
   return o;
+}
+
+gchar *dt_util_float_to_str(const gchar *format, const double value)
+{
+#if defined(WIN32)
+  _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+  setlocale (LC_NUMERIC, "C");
+#else
+  locale_t nlocale = newlocale(LC_NUMERIC_MASK, "C", (locale_t) 0);
+  locale_t locale = uselocale(nlocale);
+#endif
+
+  gchar *txt = g_strdup_printf(format, value);
+  
+#if defined(WIN32)
+  _configthreadlocale(_DISABLE_PER_THREAD_LOCALE);
+#else
+  uselocale(locale);
+  freelocale(nlocale);
+#endif
+  return txt;
 }
 
 gchar *dt_util_str_replace(const gchar *string, const gchar *pattern, const gchar *substitute)
@@ -446,7 +501,7 @@ static cairo_surface_t *_util_get_svg_img(gchar *logo, const float size)
                                                        final_height, stride);
     if(cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS)
     {
-      fprintf(stderr, "warning: can't load darktable logo from SVG file `%s'\n", dtlogo);
+      dt_print(DT_DEBUG_ALWAYS, "warning: can't load darktable logo from SVG file `%s'\n", dtlogo);
       cairo_surface_destroy(surface);
       free(image_buffer);
       image_buffer = NULL;
@@ -464,7 +519,8 @@ static cairo_surface_t *_util_get_svg_img(gchar *logo, const float size)
   }
   else
   {
-    fprintf(stderr, "warning: can't load darktable logo from SVG file `%s'\n%s\n", dtlogo, error->message);
+    dt_print(DT_DEBUG_ALWAYS,
+             "warning: can't load darktable logo from SVG file `%s'\n%s\n", dtlogo, error->message);
     g_error_free(error);
   }
 
@@ -566,7 +622,9 @@ double dt_util_gps_string_to_number(const gchar *input)
   gchar **list = g_strsplit(input, ",", 0);
   if(list)
   {
-    if(list[2] == NULL) // format DDD,MM.mm{N|S}
+    if(list[1] == NULL) // Already in decimal format
+      res = g_ascii_strtod(list[0], NULL);
+    else if(list[2] == NULL) // format DDD,MM.mm{N|S}
       res = g_ascii_strtoll(list[0], NULL, 10) + (g_ascii_strtod(list[1], NULL) / 60.0);
     else if(list[3] == NULL) // format DDD,MM,SS{N|S}
       res = g_ascii_strtoll(list[0], NULL, 10) + (g_ascii_strtoll(list[1], NULL, 10) / 60.0)
@@ -785,10 +843,10 @@ GList *dt_util_str_to_glist(const gchar *separator, const gchar *text)
   gchar *entry = g_strdup(text);
   gchar *prev = entry;
   int len = strlen(prev);
-  while (len)
+  while(len)
   {
     gchar *next = g_strstr_len(prev, -1, separator);
-    if (next)
+    if(next)
     {
       const gchar c = next[0];
       next[0] = '\0';
@@ -842,7 +900,7 @@ char *dt_util_format_exposure(const float exposuretime)
 
 char *dt_read_file(const char *const filename, size_t *filesize)
 {
-  if (filesize) *filesize = 0;
+  if(filesize) *filesize = 0;
   FILE *fd = g_fopen(filename, "rb");
   if(!fd) return NULL;
 
@@ -855,9 +913,9 @@ char *dt_read_file(const char *const filename, size_t *filesize)
 
   const size_t count = fread(content, sizeof(char), end, fd);
   fclose(fd);
-  if (count == end)
+  if(count == end)
   {
-    if (filesize) *filesize = end;
+    if(filesize) *filesize = end;
     return content;
   }
   free(content);
@@ -969,18 +1027,26 @@ gboolean dt_has_same_path_basename(const char *filename1, const char *filename2)
 char *dt_copy_filename_extension(const char *filename1, const char *filename2)
 {
   // assume both filenames have an extension
-  if(!filename1 || !filename2) return NULL;
-  const char *dot1 = strrchr(filename1, '.');
-  if(!dot1) return NULL;
+  if(!filename2) return NULL;
   const char *dot2 = strrchr(filename2, '.');
   if(!dot2) return NULL;
-  const int name_lgth = dot1 - filename1;
-  const int ext_lgth = strlen(dot2);
+
+  return dt_filename_change_extension(filename1, dot2+1);
+}
+
+char *dt_filename_change_extension(const char *filename, const char *ext)
+{
+  // assume both filenames have an extension
+  if(!filename || !ext) return NULL;
+  const char *dot = strrchr(filename, '.');
+  if(!dot) return NULL;
+  const int name_lgth = dot - filename + 1;
+  const int ext_lgth = strlen(ext);
   char *output = g_malloc(name_lgth + ext_lgth + 1);
   if(output)
   {
-    memcpy(output, filename1, name_lgth);
-    memcpy(&output[name_lgth], &filename2[strlen(filename2) - ext_lgth], ext_lgth + 1);
+    memcpy(output, filename, name_lgth);
+    memcpy(&output[name_lgth], ext, ext_lgth + 1);
   }
   return output;
 }
@@ -994,6 +1060,42 @@ gchar *dt_str_replace(const char *string, const char *search, const char *replac
   return res;
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+gboolean dt_str_commasubstring(const char *list, const char *search)
+{
+  if(search == NULL)
+    return FALSE;
+
+  gchar *nlist = g_strdup(list);
+  char delimiter[] = ",";
+
+  char *ptr =strtok(nlist, delimiter);
+  while(ptr != NULL)
+  {
+    if(g_strcmp0(search, ptr) == 0)
+    {
+      g_free(nlist);
+      return TRUE;
+    }
+    ptr = strtok(NULL, delimiter);
+  }
+
+  g_free(nlist);
+  return FALSE;
+}
+
+gboolean dt_is_scene_referred(void)
+{
+  return dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (filmic)")
+    || dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (sigmoid)");
+}
+
+gboolean dt_is_display_referred(void)
+{
+  return dt_conf_is_equal("plugins/darkroom/workflow", "display-referred (legacy)");
+}
+
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

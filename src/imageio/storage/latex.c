@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2012-2021 darktable developers.
+    Copyright (C) 2012-2023 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -21,8 +21,6 @@
 #include "common/file_location.h"
 #include "common/image.h"
 #include "common/image_cache.h"
-#include "common/imageio.h"
-#include "common/imageio_module.h"
 #include "common/metadata.h"
 #include "common/utility.h"
 #include "common/variables.h"
@@ -32,6 +30,9 @@
 #include "dtgtk/paint.h"
 #include "gui/gtk.h"
 #include "gui/gtkentry.h"
+#include "gui/accelerators.h"
+#include "imageio/imageio_common.h"
+#include "imageio/imageio_module.h"
 #include "imageio/storage/imageio_storage_api.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
@@ -71,31 +72,68 @@ const char *name(const struct dt_imageio_module_storage_t *self)
   return _("LaTeX book template");
 }
 
-void *legacy_params(dt_imageio_module_storage_t *self, const void *const old_params,
-                    const size_t old_params_size, const int old_version, const int new_version,
+void *legacy_params(dt_imageio_module_storage_t *self,
+                    const void *const old_params,
+                    const size_t old_params_size,
+                    const int old_version,
+                    int *new_version,
                     size_t *new_size)
 {
-  if(old_version == 1 && new_version == 2)
+  typedef struct dt_imageio_latex_v2_t
+  {
+    char filename[DT_MAX_PATH_FOR_PARAMS];
+    char title[1024];
+    char cached_dirname[DT_MAX_PATH_FOR_PARAMS]; // expanded during
+                                                 // first img store,
+                                                 // not stored in
+                                                 // param struct.
+    dt_variables_params_t *vp;
+    GList *l;
+  } dt_imageio_latex_v2_t;
+
+  if(old_version == 1)
   {
     typedef struct dt_imageio_latex_v1_t
     {
       char filename[1024];
       char title[1024];
-      char cached_dirname[1024]; // expanded during first img store, not stored in param struct.
+      char cached_dirname[1024]; // expanded during first img store,
+                                 // not stored in param struct.
       dt_variables_params_t *vp;
       GList *l;
     } dt_imageio_latex_v1_t;
 
-    dt_imageio_latex_t *n = (dt_imageio_latex_t *)malloc(sizeof(dt_imageio_latex_t));
-    dt_imageio_latex_v1_t *o = (dt_imageio_latex_v1_t *)old_params;
+    const dt_imageio_latex_v1_t *o = (dt_imageio_latex_v1_t *)old_params;
+    dt_imageio_latex_v2_t *n =
+      (dt_imageio_latex_v2_t *)malloc(sizeof(dt_imageio_latex_v2_t));
 
     g_strlcpy(n->filename, o->filename, sizeof(n->filename));
     g_strlcpy(n->title, o->title, sizeof(n->title));
     g_strlcpy(n->cached_dirname, o->cached_dirname, sizeof(n->cached_dirname));
 
-    *new_size = self->params_size(self);
+    *new_version = 2;
+    *new_size = sizeof(dt_imageio_latex_v2_t)
+                 - 2 * sizeof(void *) - DT_MAX_PATH_FOR_PARAMS;
     return n;
   }
+
+  // incremental update supported:
+  /*
+  typedef struct dt_imageio_latex_v3_t
+  {
+    ...
+  } dt_imageio_latex_v3_t;
+
+  if(old_version == 2)
+  {
+    // let's update from 2 to 3
+
+    ...
+    *new_size = sizeof(dt_imageio_latex_v3_t) - 2 * sizeof(void *) - DT_MAX_PATH_FOR_PARAMS;
+    *new_version = 3;
+    return n;
+  }
+  */
   return NULL;
 }
 
@@ -149,22 +187,12 @@ void gui_init(dt_imageio_module_storage_t *self)
   gtk_box_pack_start(GTK_BOX(self->widget), hbox, TRUE, TRUE, 0);
   GtkWidget *widget;
 
-  widget = gtk_entry_new();
-  gtk_entry_set_width_chars(GTK_ENTRY(widget), 0);
-  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
-  const char *dir = dt_conf_get_string_const("plugins/imageio/storage/latex/file_directory");
-  if(dir)
-  {
-    gtk_entry_set_text(GTK_ENTRY(widget), dir);
-  }
-  d->entry = GTK_ENTRY(widget);
-
-  dt_gtkentry_setup_completion(GTK_ENTRY(widget), dt_gtkentry_get_default_path_compl_list());
-
-  gtk_widget_set_tooltip_text(widget,
-      _("enter the path where to put exported images\nvariables support bash like string manipulation\n"
-      "type '$(' to activate the completion and see the list of variables"));
-  g_signal_connect(G_OBJECT(widget), "changed", G_CALLBACK(entry_changed_callback), self);
+  d->entry = GTK_ENTRY(dt_action_entry_new(DT_ACTION(self), N_("path"), G_CALLBACK(entry_changed_callback), self,
+                                           _("enter the path where to put exported images\nvariables support bash like string manipulation\n"
+                                             "type '$(' to activate the completion and see the list of variables"),
+                                           dt_conf_get_string_const("plugins/imageio/storage/latex/file_directory")));
+  dt_gtkentry_setup_completion(d->entry, dt_gtkentry_get_default_path_compl_list());
+  gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(d->entry), TRUE, TRUE, 0);
 
   widget = dtgtk_button_new(dtgtk_cairo_paint_directory, CPF_NONE, NULL);
   gtk_widget_set_name(widget, "non-flat");
@@ -177,17 +205,12 @@ void gui_init(dt_imageio_module_storage_t *self)
 
   gtk_box_pack_start(GTK_BOX(hbox), dt_ui_label_new(_("title")), FALSE, FALSE, 0);
 
-  d->title_entry = GTK_ENTRY(gtk_entry_new());
-  gtk_entry_set_width_chars(d->title_entry, 0);
+  d->title_entry = GTK_ENTRY(dt_action_entry_new(DT_ACTION(self), N_("path"), G_CALLBACK(title_changed_callback), self,
+                                           _("enter the title of the book"),
+                                           dt_conf_get_string_const("plugins/imageio/storage/latex/title")));
   gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(d->title_entry), TRUE, TRUE, 0);
+
   // TODO: support title, author, subject, keywords (collect tags?)
-  gtk_widget_set_tooltip_text(GTK_WIDGET(d->title_entry), _("enter the title of the book"));
-  dir = dt_conf_get_string_const("plugins/imageio/storage/latex/title");
-  if(dir)
-  {
-    gtk_entry_set_text(GTK_ENTRY(d->title_entry), dir);
-  }
-  g_signal_connect(G_OBJECT(d->title_entry), "changed", G_CALLBACK(title_changed_callback), self);
 }
 
 void gui_cleanup(dt_imageio_module_storage_t *self)
@@ -209,7 +232,7 @@ static gint sort_pos(pair_t *a, pair_t *b)
   return a->pos - b->pos;
 }
 
-int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, const int imgid,
+int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, const dt_imgid_t imgid,
           dt_imageio_module_format_t *format, dt_imageio_module_data_t *fdata, const int num, const int total,
           const gboolean high_quality, const gboolean upscale, const gboolean export_masks,
           dt_colorspaces_color_profile_type_t icc_type, const gchar *icc_filename, dt_iop_color_intent_t icc_intent,
@@ -219,8 +242,7 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
 
   char filename[PATH_MAX] = { 0 };
   char dirname[PATH_MAX] = { 0 };
-  gboolean from_cache = FALSE;
-  dt_image_full_path(imgid, dirname, sizeof(dirname), &from_cache);
+  dt_image_full_path(imgid, dirname, sizeof(dirname), NULL);
   // we're potentially called in parallel. have sequence number synchronized:
   dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
   {
@@ -262,7 +284,7 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
     if(*c == '/') *c = '\0';
     if(g_mkdir_with_parents(dirname, 0755))
     {
-      fprintf(stderr, "[imageio_storage_latex] could not create directory: `%s'!\n", dirname);
+      dt_print(DT_DEBUG_ALWAYS, "[imageio_storage_latex] could not create directory: `%s'!\n", dirname);
       dt_control_log(_("could not create directory `%s'!"), dirname);
       dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
       return 1;
@@ -343,7 +365,6 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
     // g_list_free_full(res_subj, &g_free);
     // g_free(tags);
     d->l = g_list_insert_sorted(d->l, pair, (GCompareFunc)sort_pos);
-    free(pair);
   } // end of critical block
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
 
@@ -351,7 +372,7 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
   dt_imageio_export(imgid, filename, format, fdata, high_quality, upscale, TRUE, export_masks, icc_type, icc_filename,
                     icc_intent, self, sdata, num, total, metadata);
 
-  printf("[export_job] exported to `%s'\n", filename);
+  dt_print(DT_DEBUG_ALWAYS, "[export_job] exported to `%s'\n", filename);
   dt_control_log(ngettext("%d/%d exported to `%s'", "%d/%d exported to `%s'", num),
                  num, total, filename);
   return 0;
@@ -448,6 +469,8 @@ int set_params(dt_imageio_module_storage_t *self, const void *params, const int 
   return 0;
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

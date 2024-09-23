@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2021 darktable developers.
+    Copyright (C) 2011-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -83,12 +83,14 @@ int default_group()
   return IOP_GROUP_COLOR | IOP_GROUP_GRADING;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_LAB;
 }
 
-const char *description(struct dt_iop_module_t *self)
+const char **description(struct dt_iop_module_t *self)
 {
   return dt_iop_set_description(self, _("saturate and reduce the lightness of the most saturated pixels\n"
                                         "to make the colors more vivid."),
@@ -101,7 +103,7 @@ const char *description(struct dt_iop_module_t *self)
 void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,
              void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
-  if (!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
+  if(!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
                                          ivoid, ovoid, roi_in, roi_out))
     return; // image has been copied through to output and module's trouble flag has been updated
 
@@ -112,12 +114,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   const float amount = (d->amount * 0.01);
   const int npixels = roi_out->height * roi_out->width;
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(amount, npixels) \
-  dt_omp_sharedconst(in, out) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(int k = 0; k < 4 * npixels; k += 4)
   {
     /* saturation weight 0 - 1 */
@@ -125,10 +122,8 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
     const float ls = 1.0f - ((amount * sw) * .25f);
     const float ss = 1.0f + (amount * sw);
     const dt_aligned_pixel_t weights = { ls, ss, ss, 1.0f };
-#ifdef _OPENMP
-#pragma omp simd aligned(in, out : 16)
-#endif
-    for (int c = 0; c < 4; c++)
+    DT_OMP_SIMD(aligned(in, out : 16))
+    for(int c = 0; c < 4; c++)
     {
       out[k + c] = in[k + c] * weights[c];
     }
@@ -142,7 +137,6 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
 {
   dt_iop_vibrance_data_t *data = (dt_iop_vibrance_data_t *)piece->data;
   dt_iop_vibrance_global_data_t *gd = (dt_iop_vibrance_global_data_t *)self->global_data;
-  cl_int err = -999;
 
   const int devid = piece->pipe->devid;
   const int width = roi_in->width;
@@ -150,22 +144,9 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
 
   const float amount = data->amount * 0.01f;
 
-  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };
-
-  dt_opencl_set_kernel_arg(devid, gd->kernel_vibrance, 0, sizeof(cl_mem), (void *)&dev_in);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_vibrance, 1, sizeof(cl_mem), (void *)&dev_out);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_vibrance, 2, sizeof(int), (void *)&width);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_vibrance, 3, sizeof(int), (void *)&height);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_vibrance, 4, sizeof(float), (void *)&amount);
-  err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_vibrance, sizes);
-  if(err != CL_SUCCESS) goto error;
-
-  return TRUE;
-
-error:
-  dt_print(DT_DEBUG_OPENCL, "[opencl_vibrance] couldn't enqueue kernel! %d\n", err);
-  return FALSE;
-}
+  return dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_vibrance, width, height,
+    CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(amount));
+ }
 #endif
 
 
@@ -222,6 +203,9 @@ void gui_init(struct dt_iop_module_t *self)
   dt_bauhaus_slider_set_format(g->amount_scale, "%");
   gtk_widget_set_tooltip_text(g->amount_scale, _("the amount of vibrance"));
 }
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
+

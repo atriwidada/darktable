@@ -1,6 +1,6 @@
 /*
    This file is part of darktable,
-   Copyright (C) 2018-2021 darktable developers.
+   Copyright (C) 2018-2024 darktable developers.
 
    darktable is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -15,6 +15,7 @@
    You should have received a copy of the GNU General Public License
    along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -26,6 +27,7 @@
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop_math.h"
+#include "develop/openmp_maths.h"
 #include "dtgtk/button.h"
 #include "dtgtk/drawingarea.h"
 #include "dtgtk/expander.h"
@@ -44,10 +46,6 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef __SSE2__
-#include "common/sse.h"
-#endif
 
 #define DT_GUI_CURVE_EDITOR_INSET DT_PIXEL_APPLY_DPI(1)
 
@@ -179,15 +177,40 @@ const char *deprecated_msg()
   return _("this module is deprecated. better use filmic rgb module instead.");
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_LAB;
 }
 
-int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version, void *new_params,
-                  const int new_version)
+int legacy_params(dt_iop_module_t *self,
+                  const void *const old_params,
+                  const int old_version,
+                  void **new_params,
+                  int32_t *new_params_size,
+                  int *new_version)
 {
-  if(old_version == 1 && new_version == 3)
+  typedef struct dt_iop_filmic_params_v3_t
+  {
+    float grey_point_source;
+    float black_point_source;
+    float white_point_source;
+    float security_factor;
+    float grey_point_target;
+    float black_point_target;
+    float white_point_target;
+    float output_power;
+    float latitude_stops;
+    float contrast;
+    float saturation;
+    float global_saturation;
+    float balance;
+    int interpolator;
+    int preserve_color;
+  } dt_iop_filmic_params_v3_t;
+
+  if(old_version == 1)
   {
     typedef struct dt_iop_filmic_params_v1_t
     {
@@ -206,11 +229,9 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
       int interpolator;
     } dt_iop_filmic_params_v1_t;
 
-    dt_iop_filmic_params_v1_t *o = (dt_iop_filmic_params_v1_t *)old_params;
-    dt_iop_filmic_params_t *n = (dt_iop_filmic_params_t *)new_params;
-    dt_iop_filmic_params_t *d = (dt_iop_filmic_params_t *)self->default_params;
-
-    *n = *d; // start with a fresh copy of default parameters
+    const dt_iop_filmic_params_v1_t *o = (dt_iop_filmic_params_v1_t *)old_params;
+    dt_iop_filmic_params_v3_t *n =
+      (dt_iop_filmic_params_v3_t *)malloc(sizeof(dt_iop_filmic_params_v3_t));
 
     n->grey_point_source = o->grey_point_source;
     n->white_point_source = o->white_point_source;
@@ -227,10 +248,14 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
     n->interpolator = o->interpolator;
     n->preserve_color = 0;
     n->global_saturation = 100;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_filmic_params_v3_t);
+    *new_version = 3;
     return 0;
   }
 
-  if (old_version == 2 && new_version == 3)
+  if(old_version == 2)
   {
     typedef struct dt_iop_filmic_params_v2_t
     {
@@ -250,11 +275,9 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
       int preserve_color;
     } dt_iop_filmic_params_v2_t;
 
-    dt_iop_filmic_params_v2_t *o = (dt_iop_filmic_params_v2_t *)old_params;
-    dt_iop_filmic_params_t *n = (dt_iop_filmic_params_t *)new_params;
-    dt_iop_filmic_params_t *d = (dt_iop_filmic_params_t *)self->default_params;
-
-    *n = *d; // start with a fresh copy of default parameters
+    const dt_iop_filmic_params_v2_t *o = (dt_iop_filmic_params_v2_t *)old_params;
+    dt_iop_filmic_params_v3_t *n =
+      (dt_iop_filmic_params_v3_t *)malloc(sizeof(dt_iop_filmic_params_v3_t));
 
     n->grey_point_source = o->grey_point_source;
     n->white_point_source = o->white_point_source;
@@ -271,6 +294,10 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
     n->interpolator = o->interpolator;
     n->preserve_color = o->preserve_color;
     n->global_saturation = 100;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_filmic_params_v3_t);
+    *new_version = 3;
     return 0;
   }
   return 1;
@@ -371,17 +398,125 @@ void init_presets(dt_iop_module_so_t *self)
                              self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_DISPLAY);
 }
 
-static inline float gaussian(float x, float std)
+// we need to move the actual processing of each pixel into a separate
+// function to help the optimizer.  This will get inlined, but actually
+// having the code inside the loop costs us 30% extra time with GCC10.
+static void _process_pixel(const dt_aligned_pixel_t in,
+                           dt_aligned_pixel_t out,
+                           const float grey_source,
+                           const float black_source,
+                           const float inv_dynamic_range,
+                           const dt_aligned_pixel_t output_power,
+                           const float saturation,
+                           const float EPS,
+                           const int desaturate,
+                           const int preserve_color,
+                           const dt_iop_filmic_data_t *const data)
 {
-  return expf(- (x * x) / (2.0f * std * std)) / (std * powf(2.0f * M_PI, 0.5f));
+    dt_aligned_pixel_t XYZ;
+    dt_Lab_to_XYZ(in, XYZ);
+
+    dt_aligned_pixel_t input_rgb;
+    dt_XYZ_to_prophotorgb(XYZ, input_rgb);
+
+    float concavity, luma;
+
+    // Global desaturation
+    if(desaturate)
+    {
+      luma = XYZ[1];
+
+      for_each_channel(c)
+      {
+        input_rgb[c] = luma + saturation * (input_rgb[c] - luma);
+      }
+    }
+
+    dt_aligned_pixel_t rgb;
+    if(preserve_color)
+    {
+      dt_aligned_pixel_t ratios;
+      float max = dt_vector_channel_max(input_rgb);
+
+      // Save the ratios
+      for_each_channel(c)
+        ratios[c] = input_rgb[c] / max;
+
+      // Log tone-mapping
+      max = max / grey_source;
+      max = (max > EPS) ? (fastlog2(max) - black_source) * inv_dynamic_range : EPS;
+      max = CLAMP(max, 0.0f, 1.0f);
+
+      // Filmic S curve on the max RGB
+      size_t index = CLAMP(max * 0x10000ul, 0, 0xffff);
+      max = data->table[index];
+      concavity = data->grad_2[index];
+
+      // Re-apply ratios
+      for_each_channel(c)
+        rgb[c] = ratios[c] * max;
+
+      luma = max;
+    }
+    else
+    {
+      size_t DT_ALIGNED_ARRAY index[4];
+
+      for_each_channel(c)
+        input_rgb[c] /= grey_source;
+      dt_aligned_pixel_t log_rgb;
+      dt_vector_log2(input_rgb, log_rgb);
+      for_each_channel(c)
+      {
+        // Log tone-mapping on RGB
+        rgb[c] = (input_rgb[c] > EPS) ? (log_rgb[c] - black_source) * inv_dynamic_range : EPS;
+      }
+      for_each_channel(c)
+      {
+        rgb[c] = CLAMP(rgb[c], 0.0f, 1.0f);
+        // Store the index of the LUT
+        index[c] = CLAMP(rgb[c] * 0x10000ul, 0, 0xffff);
+      }
+
+      // Concavity
+      const float XYZ_luma = dt_prophotorgb_to_XYZ_luma(rgb);
+      concavity = data->grad_2[(int)CLAMP(XYZ_luma * 0x10000ul, 0, 0xffff)];
+
+      // Filmic S curve
+      for_each_channel(c)
+        rgb[c] = data->table[index[c]];
+
+      luma = dt_prophotorgb_to_XYZ_luma(rgb);
+    }
+
+    // Desaturate on the non-linear parts of the curve
+    for_each_channel(c)
+    {
+      // Desaturate on the non-linear parts of the curve
+      rgb[c] = luma + concavity * (rgb[c] - luma);
+      rgb[c] = CLAMP(rgb[c], 0.0f, 1.0f);
+    }
+    dt_aligned_pixel_t output_rgb;
+    dt_vector_powf(rgb, output_power, output_rgb);
+    // transform the result back to Lab
+    // sRGB -> XYZ -> Lab
+    dt_aligned_pixel_t res;
+    dt_prophotorgb_to_Lab(output_rgb, res);
+    copy_pixel_nontemporal(out, res);
 }
 
-void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
-             const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
+void process(dt_iop_module_t *self,
+             dt_dev_pixelpipe_iop_t *piece,
+             const void *const ivoid,
+             void *const ovoid,
+             const dt_iop_roi_t *const roi_in,
+             const dt_iop_roi_t *const roi_out)
 {
-  dt_iop_filmic_data_t *const data = (dt_iop_filmic_data_t *)piece->data;
+  if(!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
+                                        ivoid, ovoid, roi_in, roi_out))
+    return;
 
-  const int ch = piece->colors;
+  dt_iop_filmic_data_t *const data = (dt_iop_filmic_data_t *)piece->data;
 
   /** The log2(x) -> -INF when x -> 0
   * thus very low values (noise) will get even lower, resulting in noise negative amplification,
@@ -397,230 +532,26 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   const int desaturate = (data->global_saturation == 100.0f) ? FALSE : TRUE;
   const float saturation = data->global_saturation / 100.0f;
 
-#ifdef _OPENMP
-#pragma omp parallel for SIMD() default(none) \
-  dt_omp_firstprivate(ch, data, desaturate, ivoid, ovoid, preserve_color, roi_out, saturation, EPS) \
-  schedule(static)
-#endif
-  for(size_t k = 0; k < (size_t)roi_out->height * roi_out->width * ch; k += ch)
+  const float *const restrict in = (float*)ivoid;
+  float *const restrict out = (float*)ovoid;
+  const size_t npixels = (size_t)roi_out->width * roi_out->height;
+
+  const float grey_source = data->grey_source;
+  const float black_source = data->black_source;
+  const float inv_dynamic_range = 1.0f / data->dynamic_range;
+  const dt_aligned_pixel_t output_power = {
+    data->output_power, data->output_power,
+    data->output_power, data->output_power
+  };
+
+  DT_OMP_FOR()
+  for(size_t k = 0; k < (size_t)4 * npixels; k += 4)
   {
-    float *in = ((float *)ivoid) + k;
-    float *out = ((float *)ovoid) + k;
-
-    dt_aligned_pixel_t XYZ;
-    dt_Lab_to_XYZ(in, XYZ);
-
-    dt_aligned_pixel_t rgb = { 0.0f };
-    dt_XYZ_to_prophotorgb(XYZ, rgb);
-
-    float concavity, luma;
-
-    // Global desaturation
-    if (desaturate)
-    {
-      luma = XYZ[1];
-
-      for(int c = 0; c < 3; c++)
-      {
-        rgb[c] = luma + saturation * (rgb[c] - luma);
-      }
-    }
-
-    if (preserve_color)
-    {
-      int index;
-      dt_aligned_pixel_t ratios;
-      float max = fmaxf(fmaxf(rgb[0], rgb[1]), rgb[2]);
-
-      // Save the ratios
-      for (int c = 0; c < 3; ++c) ratios[c] = rgb[c] / max;
-
-      // Log tone-mapping
-      max = max / data->grey_source;
-      max = (max > EPS) ? (fastlog2(max) - data->black_source) / data->dynamic_range : EPS;
-      max = CLAMP(max, 0.0f, 1.0f);
-
-      // Filmic S curve on the max RGB
-      index = CLAMP(max * 0x10000ul, 0, 0xffff);
-      max = data->table[index];
-      concavity = data->grad_2[index];
-
-      // Re-apply ratios
-      for (int c = 0; c < 3; ++c) rgb[c] = ratios[c] * max;
-
-      luma = max;
-    }
-    else
-    {
-      int DT_ALIGNED_ARRAY index[4];
-
-      for(int c = 0; c < 3; c++)
-      {
-        // Log tone-mapping on RGB
-        rgb[c] = rgb[c] / data->grey_source;
-        rgb[c] = (rgb[c] > EPS) ? (fastlog2(rgb[c]) - data->black_source) / data->dynamic_range : EPS;
-        rgb[c] = CLAMP(rgb[c], 0.0f, 1.0f);
-
-        // Store the index of the LUT
-        index[c] = CLAMP(rgb[c] * 0x10000ul, 0, 0xffff);
-      }
-
-      // Concavity
-      dt_prophotorgb_to_XYZ(rgb, XYZ);
-      concavity = data->grad_2[(int)CLAMP(XYZ[1] * 0x10000ul, 0, 0xffff)];
-
-      // Filmic S curve
-      for(int c = 0; c < 3; c++) rgb[c] = data->table[index[c]];
-
-      dt_prophotorgb_to_XYZ(rgb, XYZ);
-      luma = XYZ[1];
-    }
-
-    // Desaturate on the non-linear parts of the curve
-    for(int c = 0; c < 3; c++)
-    {
-      // Desaturate on the non-linear parts of the curve
-      rgb[c] = luma + concavity * (rgb[c] - luma);
-
-      // Apply the transfer function of the display
-      rgb[c] = powf(CLAMP(rgb[c], 0.0f, 1.0f), data->output_power);
-    }
-
-    // transform the result back to Lab
-    // sRGB -> XYZ
-    dt_prophotorgb_to_Lab(rgb, out);
+    _process_pixel(in + k, out +k, grey_source, black_source, inv_dynamic_range, output_power,
+                   saturation, EPS, desaturate, preserve_color, data);
   }
-
-  if(piece->pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK)
-    dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
+  dt_omploop_sfence();
 }
-
-
-#if defined(__SSE__)
-void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,
-             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
-{
-  dt_iop_filmic_data_t *const data = (dt_iop_filmic_data_t *)piece->data;
-
-  const int ch = piece->colors;
-  const int preserve_color = data->preserve_color;
-
-  const float grey = data->grey_source;
-  const float black = data->black_source;
-  const float dynamic_range = data->dynamic_range;
-  const float saturation = (data->global_saturation / 100.0f);
-
-  const __m128 grey_sse = _mm_set1_ps(grey);
-  const __m128 black_sse = _mm_set1_ps(black);
-  const __m128 dynamic_range_sse = _mm_set1_ps(dynamic_range);
-  const __m128 power = _mm_set1_ps(data->output_power);
-  const __m128 saturation_sse = _mm_set1_ps(saturation);
-
-  // If saturation == 100, we have a no-op. Disable the op then.
-  const int desaturate = (data->global_saturation == 100.0f) ? FALSE : TRUE;
-
-  const float eps = powf(2.0f, -16);
-  const __m128 EPS = _mm_setr_ps(eps, eps, eps, 0.0f);
-  const __m128 zero = _mm_setzero_ps();
-  const __m128 one = _mm_set1_ps(1.0f);
-
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(black, black_sse, ch, data, desaturate, dynamic_range, \
-                      dynamic_range_sse, EPS, grey, grey_sse, ivoid, one, \
-                      ovoid, power, preserve_color, roi_out, saturation_sse, \
-                      zero, eps) \
-  schedule(static)
-#endif
-  for(size_t k = 0; k < (size_t)roi_out->height * roi_out->width * ch; k += ch)
-  {
-    float *in = ((float *)ivoid) + k;
-    float *out = ((float *)ovoid) + k;
-
-    __m128 XYZ = dt_Lab_to_XYZ_sse2(_mm_load_ps(in));
-    __m128 rgb = dt_XYZ_to_prophotoRGB_sse2(XYZ);
-
-    __m128 concavity;
-    __m128 luma;
-
-    // Global saturation adjustment
-    if (desaturate)
-    {
-      luma = _mm_set1_ps(XYZ[1]);
-      rgb = luma + saturation_sse * (rgb - luma);
-    }
-
-    if (preserve_color)
-    {
-      // Get the max of the RGB values
-      float max = fmax(fmaxf(rgb[0], rgb[1]), rgb[2]);
-      __m128 max_sse = _mm_set1_ps(max);
-
-      // Save the ratios
-      const __m128 ratios = rgb / max_sse;
-
-      // Log tone-mapping
-      max = max / grey;
-      max = (max > eps) ? (fastlog2(max) - black) / dynamic_range : eps;
-      max = CLAMP(max, 0.0f, 1.0f);
-
-      // Filmic S curve on the max RGB
-      const int index = CLAMP(max * 0x10000ul, 0, 0xffff);
-      max = data->table[index];
-      concavity = _mm_set1_ps(data->grad_2[index]);
-
-      // Re-apply ratios
-      max_sse = _mm_set1_ps(max);
-      rgb = ratios * max_sse;
-      luma = max_sse;
-    }
-    else
-    {
-      // Log tone-mapping
-      rgb = rgb / grey_sse;
-      rgb = _mm_max_ps(rgb, EPS);
-      rgb = _mm_log2_ps(rgb);
-      rgb -= black_sse;
-      rgb /=  dynamic_range_sse;
-      rgb = _mm_max_ps(rgb, zero);
-      rgb = _mm_min_ps(rgb, one);
-
-      // Store the derivative at the pixel luminance
-      XYZ = dt_prophotoRGB_to_XYZ_sse2(rgb);
-      concavity = _mm_set1_ps(data->grad_2[(int)CLAMP(XYZ[1] * 0x10000ul, 0, 0xffff)]);
-
-      // Unpack SSE vector to regular array
-      dt_aligned_pixel_t rgb_unpack;
-
-      // Filmic S curve
-      for (int c = 0; c < 4; ++c)
-      {
-        rgb_unpack[c] = data->table[(int)CLAMP(rgb[c] * 0x10000ul, 0, 0xffff)];
-      }
-
-      rgb = _mm_load_ps(rgb_unpack);
-      XYZ = dt_prophotoRGB_to_XYZ_sse2(rgb);
-      luma = _mm_set1_ps(XYZ[1]);
-    }
-
-    rgb = luma + concavity * (rgb - luma);
-    rgb = _mm_max_ps(rgb, zero);
-    rgb = _mm_min_ps(rgb, one);
-
-    // Apply the transfer function of the display
-    rgb = _mm_pow_ps(rgb, power);
-
-    // transform the result back to Lab
-    // sRGB -> XYZ
-    XYZ = dt_prophotoRGB_to_XYZ_sse2(rgb);
-    // XYZ -> Lab
-    _mm_stream_ps(out, dt_XYZ_to_Lab_sse2(XYZ));
-  }
-
-  if(piece->pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
-}
-#endif
-
 
 #ifdef HAVE_OPENCL
 int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out,
@@ -629,12 +560,11 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   dt_iop_filmic_data_t *d = (dt_iop_filmic_data_t *)piece->data;
   dt_iop_filmic_global_data_t *gd = (dt_iop_filmic_global_data_t *)self->global_data;
 
-  cl_int err = -999;
+  cl_int err = DT_OPENCL_DEFAULT_ERROR;
   const int devid = piece->pipe->devid;
   const int width = roi_in->width;
   const int height = roi_in->height;
 
-  size_t sizes[] = { ROUNDUPWD(width), ROUNDUPHT(height), 1 };
 
   cl_mem dev_table = NULL;
   cl_mem diff_table = NULL;
@@ -653,37 +583,21 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   const int preserve_color = d->preserve_color;
   const float saturation = d->global_saturation / 100.0f;
 
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 0, sizeof(cl_mem), (void *)&dev_in);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 1, sizeof(cl_mem), (void *)&dev_out);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 2, sizeof(int), (void *)&width);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 3, sizeof(int), (void *)&height);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 4, sizeof(float), (void *)&dynamic_range);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 5, sizeof(float), (void *)&shadows_range);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 6, sizeof(float), (void *)&grey);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 7, sizeof(cl_mem), (void *)&dev_table);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 8, sizeof(cl_mem), (void *)&diff_table);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 9, sizeof(float), (void *)&contrast);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 10, sizeof(float), (void *)&power);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 11, sizeof(int), (void *)&preserve_color);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_filmic, 12, sizeof(int), (void *)&saturation);
-
-  err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_filmic, sizes);
-  if(err != CL_SUCCESS) goto error;
-  dt_opencl_release_mem_object(dev_table);
-  dt_opencl_release_mem_object(diff_table);
-  return TRUE;
+  err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filmic, width, height,
+    CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(dynamic_range), CLARG(shadows_range),
+    CLARG(grey), CLARG(dev_table), CLARG(diff_table), CLARG(contrast), CLARG(power), CLARG(preserve_color),
+    CLARG(saturation));
 
 error:
   dt_opencl_release_mem_object(dev_table);
   dt_opencl_release_mem_object(diff_table);
-  dt_print(DT_DEBUG_OPENCL, "[opencl_filmic] couldn't enqueue kernel! %d\n", err);
-  return FALSE;
+  return err;
 }
 #endif
 
 static void sanitize_latitude(dt_iop_filmic_params_t *p, dt_iop_filmic_gui_data_t *g)
 {
-  if (p->latitude_stops > (p->white_point_source - p->black_point_source) * 0.99f)
+  if(p->latitude_stops > (p->white_point_source - p->black_point_source) * 0.99f)
   {
     // The film latitude is its linear part
     // it can never be higher than the dynamic range
@@ -848,7 +762,8 @@ static void apply_autotune(dt_iop_module_t *self)
   gtk_widget_queue_draw(self->widget);
 }
 
-void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker, dt_dev_pixelpipe_iop_t *piece)
+void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
+                        dt_dev_pixelpipe_t *pipe)
 {
   dt_iop_filmic_gui_data_t *g = (dt_iop_filmic_gui_data_t *)self->gui_data;
   if     (picker == g->grey_point_source)
@@ -860,7 +775,7 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker, dt_dev_pixelpi
   else if(picker == g->auto_button)
     apply_autotune(self);
   else
-    fprintf(stderr, "[filmic] unknown color picker\n");
+    dt_print(DT_DEBUG_ALWAYS, "[filmic] unknown color picker\n");
 }
 
 static void grey_point_source_callback(GtkWidget *slider, gpointer user_data)
@@ -1028,7 +943,7 @@ static void interpolator_callback(GtkWidget *widget, dt_iop_module_t *self)
   dt_iop_color_picker_reset(self, TRUE);
   const int combo = dt_bauhaus_combobox_get(widget);
 
-  switch (combo)
+  switch(combo)
   {
     case CUBIC_SPLINE:
     {
@@ -1137,18 +1052,18 @@ void compute_curve_lut(dt_iop_filmic_params_t *p, float *table, float *table_tem
   int TOE_LOST = FALSE;
   int SHOULDER_LOST = FALSE;
 
-  if ((toe_log == grey_log && toe_display == grey_display) || (toe_log == 0.0f && toe_display  == black_display))
+  if((toe_log == grey_log && toe_display == grey_display) || (toe_log == 0.0f && toe_display  == black_display))
   {
     TOE_LOST = TRUE;
   }
-  if ((shoulder_log == grey_log && shoulder_display == grey_display) || (shoulder_log == 1.0f && shoulder_display == white_display))
+  if((shoulder_log == grey_log && shoulder_display == grey_display) || (shoulder_log == 1.0f && shoulder_display == white_display))
   {
     SHOULDER_LOST = TRUE;
   }
 
   // Build the curve from the nodes
 
-  if (SHOULDER_LOST && !TOE_LOST)
+  if(SHOULDER_LOST && !TOE_LOST)
   {
     // shoulder only broke - we remove it
     nodes_data->nodes = 4;
@@ -1171,7 +1086,7 @@ void compute_curve_lut(dt_iop_filmic_params_t *p, float *table, float *table_tem
     //dt_control_log(_("filmic curve using 4 nodes - highlights lost"));
 
   }
-  else if (TOE_LOST && !SHOULDER_LOST)
+  else if(TOE_LOST && !SHOULDER_LOST)
   {
     // toe only broke - we remove it
     nodes_data->nodes = 4;
@@ -1195,7 +1110,7 @@ void compute_curve_lut(dt_iop_filmic_params_t *p, float *table, float *table_tem
     //dt_control_log(_("filmic curve using 4 nodes - shadows lost"));
 
   }
-  else if (TOE_LOST && SHOULDER_LOST)
+  else if(TOE_LOST && SHOULDER_LOST)
   {
     // toe and shoulder both broke - we remove them
     nodes_data->nodes = 3;
@@ -1243,13 +1158,13 @@ void compute_curve_lut(dt_iop_filmic_params_t *p, float *table, float *table_tem
     //dt_control_log(_("filmic curve using 5 nodes - everything alright"));
   }
 
-  if (p->interpolator != 3)
+  if(p->interpolator != 3)
   {
     // Compute the interpolation
 
     // Catch bad interpolators exceptions (errors in saved params)
     int interpolator = CUBIC_SPLINE;
-    if (p->interpolator > CUBIC_SPLINE && p->interpolator <= MONOTONE_HERMITE) interpolator = p->interpolator;
+    if(p->interpolator > CUBIC_SPLINE && p->interpolator <= MONOTONE_HERMITE) interpolator = p->interpolator;
 
     curve = dt_draw_curve_new(0.0, 1.0, interpolator);
     for(int k = 0; k < nodes_data->nodes; k++) (void)dt_draw_curve_add_point(curve, nodes_data->x[k], nodes_data->y[k]);
@@ -1274,9 +1189,7 @@ void compute_curve_lut(dt_iop_filmic_params_t *p, float *table, float *table_tem
     dt_draw_curve_destroy(curve);
 
     // Average both LUT
-#ifdef _OPENMP
-#pragma omp parallel for SIMD() default(none) shared(table, table_temp, res) schedule(static)
-#endif
+    DT_OMP_FOR()
     for(int k = 0; k < res; k++) table[k] = (table[k] + table_temp[k]) / 2.0f;
   }
 
@@ -1303,7 +1216,7 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   const float grey_display = powf(p->grey_point_target / 100.0f, 1.0f / (p->output_power));
 
   float contrast = p->contrast;
-  if (contrast < grey_display / grey_log)
+  if(contrast < grey_display / grey_log)
   {
     // We need grey_display - (contrast * grey_log) <= 0.0
     contrast = 1.0001f * grey_display / grey_log;
@@ -1333,16 +1246,11 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   const float saturation = d->saturation / 100.0f;
   const float sigma = saturation * saturation * latitude * latitude;
 
-#ifdef _OPENMP
-#pragma omp parallel for SIMD() default(none) \
-  dt_omp_firstprivate(center, sigma) \
-  shared(d) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(int k = 0; k < 65536; k++)
   {
     const float x = ((float)k) / 65536.0f;
-    if (sigma != 0.0f)
+    if(sigma != 0.0f)
     {
       d->grad_2[k] = expf(-0.5f * (center - x) * (center - x) / sigma);
     }
@@ -1401,7 +1309,7 @@ void init(dt_iop_module_t *module)
 {
   module->params = calloc(1, sizeof(dt_iop_filmic_params_t));
   module->default_params = calloc(1, sizeof(dt_iop_filmic_params_t));
-  module->default_enabled = 0;
+  module->default_enabled = FALSE;
   module->params_size = sizeof(dt_iop_filmic_params_t);
   module->gui_data = NULL;
 
@@ -1457,7 +1365,7 @@ void gui_reset(dt_iop_module_t *self)
   dt_iop_color_picker_reset(self, TRUE);
   dtgtk_expander_set_expanded(DTGTK_EXPANDER(g->extra_expander), FALSE);
   dtgtk_togglebutton_set_paint(DTGTK_TOGGLEBUTTON(g->extra_toggle), dtgtk_cairo_paint_solid_arrow,
-                               CPF_STYLE_BOX | CPF_DIRECTION_LEFT, NULL);
+                               CPF_DIRECTION_LEFT, NULL);
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->extra_toggle), FALSE);
 }
 
@@ -1503,13 +1411,13 @@ static gboolean dt_iop_tonecurve_draw(GtkWidget *widget, cairo_t *crf, gpointer 
   b = Log2( 1.0f / (-1 + powf(2.0f, a)));
   d = - powf(2.0f, b);
 
-  if (grey > powf(p->grey_point_target / 100.0f, p->output_power))
+  if(grey > powf(p->grey_point_target / 100.0f, p->output_power))
   {
     // The x-coordinate rescaling is valid only when the log grey value (dynamic range center)
     // is greater or equal to the destination grey value
     rescale = TRUE;
 
-    for (int i = 0; i < 50; ++i)
+    for(int i = 0; i < 50; ++i)
     { // Optimization loop for the non-linear problem
       a = Log2((0.5f - d) / (1.0f - d)) / (grey - 1.0f);
       b = Log2( 1.0f / (-1 + powf(2.0f, a)));
@@ -1570,13 +1478,13 @@ static void _extra_options_button_changed(GtkDarktableToggleButton *widget, gpoi
   const gboolean active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g->extra_toggle));
   dtgtk_expander_set_expanded(DTGTK_EXPANDER(g->extra_expander), active);
   dtgtk_togglebutton_set_paint(DTGTK_TOGGLEBUTTON(g->extra_toggle), dtgtk_cairo_paint_solid_arrow,
-                               CPF_STYLE_BOX | (active?CPF_DIRECTION_DOWN:CPF_DIRECTION_LEFT), NULL);
+                               (active ? CPF_DIRECTION_DOWN : CPF_DIRECTION_LEFT), NULL);
 }
 
 void gui_init(dt_iop_module_t *self)
 {
   dt_iop_filmic_gui_data_t *g = IOP_GUI_ALLOC(filmic);
-  dt_iop_filmic_params_t *p = (dt_iop_filmic_params_t *)self->default_params;
+  const dt_iop_filmic_params_t *const p = (dt_iop_filmic_params_t *)self->default_params;
 
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
@@ -1586,7 +1494,7 @@ void gui_init(dt_iop_module_t *self)
   gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(g->area), TRUE, TRUE, 0);
   g_signal_connect(G_OBJECT(g->area), "draw", G_CALLBACK(dt_iop_tonecurve_draw), self);
 
-  gtk_box_pack_start(GTK_BOX(self->widget), dt_ui_section_label_new(_("logarithmic shaper")), FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(self->widget), dt_ui_section_label_new(C_("section", "logarithmic shaper")), FALSE, FALSE, 0);
 
   // grey_point_source slider
   g->grey_point_source = dt_bauhaus_slider_new_with_range(self, 0.0, 100., 0, p->grey_point_source, 2);
@@ -1597,7 +1505,8 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->grey_point_source, _("adjust to match the average luminance of the subject.\n"
                                                       "except in back-lighting situations, this should be around 18%."));
   g_signal_connect(G_OBJECT(g->grey_point_source), "value-changed", G_CALLBACK(grey_point_source_callback), self);
-  dt_color_picker_new(self, DT_COLOR_PICKER_AREA, g->grey_point_source);
+  dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
+                      g->grey_point_source);
 
   // White slider
   g->white_point_source = dt_bauhaus_slider_new_with_range(self, 0.0, 16.0, 0, p->white_point_source, 2);
@@ -1609,7 +1518,8 @@ void gui_init(dt_iop_module_t *self)
                                                        "this is a reading a lightmeter would give you on the scene.\n"
                                                        "adjust so highlights clipping is avoided"));
   g_signal_connect(G_OBJECT(g->white_point_source), "value-changed", G_CALLBACK(white_point_source_callback), self);
-  dt_color_picker_new(self, DT_COLOR_PICKER_AREA, g->white_point_source);
+  dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
+                      g->white_point_source);
 
   // Black slider
   g->black_point_source = dt_bauhaus_slider_new_with_range(self, -16.0, -0.1, 0, p->black_point_source, 2);
@@ -1621,27 +1531,29 @@ void gui_init(dt_iop_module_t *self)
                                                        "this is a reading a lightmeter would give you on the scene.\n"
                                                        "increase to get more contrast.\ndecrease to recover more details in low-lights."));
   g_signal_connect(G_OBJECT(g->black_point_source), "value-changed", G_CALLBACK(black_point_source_callback), self);
-  dt_color_picker_new(self, DT_COLOR_PICKER_AREA, g->black_point_source);
+  dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
+                      g->black_point_source);
 
   // Security factor
   g->security_factor = dt_bauhaus_slider_new_with_range(self, -50., 50., 0, p->security_factor, 2);
   dt_bauhaus_widget_set_label(g->security_factor, NULL, N_("safety factor"));
   gtk_box_pack_start(GTK_BOX(self->widget), g->security_factor, TRUE, TRUE, 0);
   dt_bauhaus_slider_set_format(g->security_factor, "%");
-  gtk_widget_set_tooltip_text(g->security_factor, _("enlarge or shrink the computed dynamic range.\n"
+  gtk_widget_set_tooltip_text(g->security_factor, _("increase or decrease the computed dynamic range.\n"
                                                     "useful in conjunction with \"auto tune levels\"."));
   g_signal_connect(G_OBJECT(g->security_factor), "value-changed", G_CALLBACK(security_threshold_callback), self);
 
   // Auto tune slider
   g->auto_button = dt_bauhaus_combobox_new(self);
   dt_bauhaus_widget_set_label(g->auto_button, NULL, N_("auto tune levels"));
-  dt_color_picker_new(self, DT_COLOR_PICKER_AREA, g->auto_button);
+  dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
+                      g->auto_button);
   gtk_widget_set_tooltip_text(g->auto_button, _("try to optimize the settings with some guessing.\n"
                                                 "this will fit the luminance range inside the histogram bounds.\n"
                                                 "works better for landscapes and evenly-lit pictures\nbut fails for high-keys and low-keys." ));
   gtk_box_pack_start(GTK_BOX(self->widget), g->auto_button, TRUE, TRUE, 0);
 
-  gtk_box_pack_start(GTK_BOX(self->widget), dt_ui_section_label_new(_("filmic S curve")), FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(self->widget), dt_ui_section_label_new(C_("section", "filmic S curve")), FALSE, FALSE, 0);
 
   // contrast slider
   g->contrast = dt_bauhaus_slider_new_with_range(self, 0., 5., 0, p->contrast, 3);
@@ -1720,10 +1632,8 @@ void gui_init(dt_iop_module_t *self)
   // add collapsible section for those extra options that are generally not to be used
 
   GtkWidget *destdisp_head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_BAUHAUS_SPACE);
-  GtkWidget *destdisp = dt_ui_section_label_new(_("destination/display"));
-  g->extra_toggle =
-    dtgtk_togglebutton_new(dtgtk_cairo_paint_solid_arrow, CPF_STYLE_BOX | CPF_DIRECTION_LEFT, NULL);
-  gtk_widget_set_name(GTK_WIDGET(g->extra_toggle), "control-button");
+  GtkWidget *destdisp = dt_ui_section_label_new(C_("section", "destination/display"));
+  g->extra_toggle = dtgtk_togglebutton_new(dtgtk_cairo_paint_solid_arrow, CPF_DIRECTION_LEFT, NULL);
   GtkWidget *extra_options = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(destdisp_head), destdisp, TRUE, TRUE, 0);
   gtk_box_pack_start(GTK_BOX(destdisp_head), g->extra_toggle, FALSE, FALSE, 0);
@@ -1731,8 +1641,7 @@ void gui_init(dt_iop_module_t *self)
   g->extra_expander = dtgtk_expander_new(destdisp_head, extra_options);
   dtgtk_expander_set_expanded(DTGTK_EXPANDER(g->extra_expander), TRUE);
   gtk_box_pack_start(GTK_BOX(self->widget), g->extra_expander, FALSE, FALSE, 0);
-  GtkStyleContext *context = gtk_widget_get_style_context(self->widget);
-  gtk_style_context_add_class(context, "dt_transparent_background");
+  dt_gui_add_class(self->widget, "dt_transparent_background");
 
   g_signal_connect(G_OBJECT(g->extra_toggle), "toggled", G_CALLBACK(_extra_options_button_changed),  (gpointer)self);
 
@@ -1773,6 +1682,8 @@ void gui_init(dt_iop_module_t *self)
 }
 
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

@@ -1,6 +1,6 @@
 /*
   This file is part of darktable,
-  Copyright (C) 2013-2020 darktable developers.
+  Copyright (C) 2013-2024 darktable developers.
 
   darktable is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -74,12 +74,17 @@ typedef struct dt_iop_colisa_global_data_t
 } dt_iop_colisa_global_data_t;
 
 
+const char *deprecated_msg()
+{
+  return _("this module is deprecated. please use colorbalance RGB module instead.");
+}
+
 const char *name()
 {
   return _("contrast brightness saturation");
 }
 
-const char *description(struct dt_iop_module_t *self)
+const char **description(struct dt_iop_module_t *self)
 {
   return dt_iop_set_description(self, _("adjust the look of the image"),
                                       _("creative"),
@@ -90,7 +95,8 @@ const char *description(struct dt_iop_module_t *self)
 
 int flags()
 {
-  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;
+  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING
+    | IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_DEPRECATED;
 }
 
 int default_group()
@@ -98,7 +104,9 @@ int default_group()
   return IOP_GROUP_BASIC | IOP_GROUP_GRADING;
 }
 
-int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
+                                            dt_dev_pixelpipe_t *pipe,
+                                            dt_dev_pixelpipe_iop_t *piece)
 {
   return IOP_CS_LAB;
 }
@@ -110,7 +118,7 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   dt_iop_colisa_data_t *d = (dt_iop_colisa_data_t *)piece->data;
   dt_iop_colisa_global_data_t *gd = (dt_iop_colisa_global_data_t *)self->global_data;
 
-  cl_int err = -999;
+  cl_int err = DT_OPENCL_DEFAULT_ERROR;
   const int devid = piece->pipe->devid;
 
   const int width = roi_in->width;
@@ -133,35 +141,20 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   if(dev_lcoeffs == NULL) goto error;
 
   size_t sizes[3];
-  sizes[0] = ROUNDUPWD(width);
-  sizes[1] = ROUNDUPWD(height);
+  sizes[0] = ROUNDUPDWD(width, devid);
+  sizes[1] = ROUNDUPDHT(height, devid);
   sizes[2] = 1;
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colisa, 0, sizeof(cl_mem), (void *)&dev_in);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colisa, 1, sizeof(cl_mem), (void *)&dev_out);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colisa, 2, sizeof(int), (void *)&width);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colisa, 3, sizeof(int), (void *)&height);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colisa, 4, sizeof(float), (void *)&saturation);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colisa, 5, sizeof(cl_mem), (void *)&dev_cm);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colisa, 6, sizeof(cl_mem), (void *)&dev_ccoeffs);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colisa, 7, sizeof(cl_mem), (void *)&dev_lm);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_colisa, 8, sizeof(cl_mem), (void *)&dev_lcoeffs);
+  dt_opencl_set_kernel_args(devid, gd->kernel_colisa, 0, CLARG(dev_in), CLARG(dev_out), CLARG(width),
+    CLARG(height), CLARG(saturation), CLARG(dev_cm), CLARG(dev_ccoeffs), CLARG(dev_lm), CLARG(dev_lcoeffs));
 
   err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_colisa, sizes);
-  if(err != CL_SUCCESS) goto error;
-
-  dt_opencl_release_mem_object(dev_lcoeffs);
-  dt_opencl_release_mem_object(dev_lm);
-  dt_opencl_release_mem_object(dev_ccoeffs);
-  dt_opencl_release_mem_object(dev_cm);
-  return TRUE;
 
 error:
   dt_opencl_release_mem_object(dev_lcoeffs);
   dt_opencl_release_mem_object(dev_lm);
   dt_opencl_release_mem_object(dev_ccoeffs);
   dt_opencl_release_mem_object(dev_cm);
-  dt_print(DT_DEBUG_OPENCL, "[opencl_colisa] couldn't enqueue kernel! %d\n", err);
-  return FALSE;
+  return err;
 }
 #endif
 
@@ -176,12 +169,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   const int height = roi_in->height;
   const int ch = piece->colors;
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(ch, height, width) \
-  shared(in, out, data) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(size_t k = 0; k < (size_t)width * height; k++)
   {
     float L = (in[k * ch + 0] < 100.0f)
@@ -210,9 +198,7 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
   if(d->contrast <= 1.0f)
   {
 // linear curve for d->contrast below 1
-#ifdef _OPENMP
-#pragma omp parallel for default(none) shared(d) schedule(static)
-#endif
+    DT_OMP_FOR()
     for(int k = 0; k < 0x10000; k++) d->ctable[k] = d->contrast * (100.0f * k / 0x10000 - 50.0f) + 50.0f;
   }
   else
@@ -221,12 +207,7 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
     const float boost = 20.0f;
     const float contrastm1sq = boost * (d->contrast - 1.0f) * (d->contrast - 1.0f);
     const float contrastscale = sqrtf(1.0f + contrastm1sq);
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-    dt_omp_firstprivate(contrastm1sq, contrastscale) \
-    shared(d) \
-    schedule(static)
-#endif
+    DT_OMP_FOR()
     for(int k = 0; k < 0x10000; k++)
     {
       float kx2m1 = 2.0f * (float)k / 0x10000 - 1.0f;
@@ -246,12 +227,7 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
   // generate precomputed brightness curve
   const float gamma = (d->brightness >= 0.0f) ? 1.0f / (1.0f + d->brightness) : (1.0f - d->brightness);
 
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(gamma) \
-  shared(d) \
-  schedule(static)
-#endif
+  DT_OMP_FOR()
   for(int k = 0; k < 0x10000; k++)
   {
     d->ltable[k] = 100.0f * powf((float)k / 0x10000, gamma);
@@ -311,6 +287,8 @@ void gui_init(struct dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->saturation, _("color saturation adjustment"));
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

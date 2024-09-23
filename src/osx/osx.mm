@@ -15,37 +15,30 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+/* workaround to fix issue #12720 */
+#define _DARWIN_C_SOURCE
+
 #include <Carbon/Carbon.h>
 #include <ApplicationServices/ApplicationServices.h>
 #include <CoreServices/CoreServices.h>
 #include <AppKit/AppKit.h>
 #include <gtk/gtk.h>
+#ifdef GDK_WINDOWING_QUARTZ
 #include <gdk/gdkquartz.h>
+#endif
+#include <gio/gio.h>
 #include <glib.h>
+#include <string.h>
 #ifdef MAC_INTEGRATION
 #include <gtkosxapplication.h>
+#endif
+#ifdef HAVE_P11KIT
+#define P11_KIT_FUTURE_UNSTABLE_API
+#include <p11-kit/p11-kit.h>
 #endif
 #include "osx.h"
 #include "libintl.h"
 
-void dt_osx_autoset_dpi(GtkWidget *widget)
-{
-#if 0
-  GdkScreen *screen = gtk_widget_get_screen(widget);
-  if(!screen)
-    screen = gdk_screen_get_default();
-  if(!screen)
-    return;
-
-  CGDirectDisplayID id = CGMainDisplayID();
-  CGSize size_in_mm = CGDisplayScreenSize(id);
-  int width = CGDisplayPixelsWide(id);
-  int height = CGDisplayPixelsHigh(id);
-  gdk_screen_set_resolution(screen,
-      25.4 * sqrt(width * width + height * height)
-           / sqrt(size_in_mm.width * size_in_mm.width + size_in_mm.height * size_in_mm.height));
-#endif
-}
 
 float dt_osx_get_ppd()
 {
@@ -122,15 +115,9 @@ char* dt_osx_get_bundle_res_path()
 #ifdef MAC_INTEGRATION
   gchar *bundle_id;
 
-#ifdef GTK_TYPE_OSX_APPLICATION
-  bundle_id = quartz_application_get_bundle_id();
-  if(bundle_id)
-    result = quartz_application_get_resource_path();
-#else
   bundle_id = gtkosx_application_get_bundle_id();
   if(bundle_id)
     result = gtkosx_application_get_resource_path();
-#endif
   g_free(bundle_id);
 
 #endif
@@ -155,6 +142,39 @@ static char* _get_user_locale()
     }
     return strdup([locale_c UTF8String]);
   }
+}
+
+static void _setup_ssl_trust(const char* const res_path)
+{
+#ifdef HAVE_P11KIT
+  gchar* const hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, res_path, strlen(res_path));
+  gchar* const file_path = g_build_filename(g_get_user_data_dir(), "darktable", "pkcs11", hash, "p11-kit-trust.module", NULL);
+  g_free(hash);
+  {
+    GFile* const cfg_file = g_file_new_for_path(file_path);
+    {
+      GFile* const cfg_dir = g_file_get_parent(cfg_file);
+      g_file_make_directory_with_parents(cfg_dir, NULL, NULL);
+      {
+        const char* const dir_path = g_file_get_path(cfg_dir);
+        p11_kit_override_system_files("", NULL, "", dir_path, NULL);
+        // p11_kit_override_system_files function doesn't copy its parameters,
+        // so do NOT call g_free(dir_path);
+      }
+      g_object_unref(cfg_dir);
+    }
+    {
+      gchar* const buf = g_strdup_printf("module: %s/lib/pkcs11/p11-kit-trust.so\n"
+                                         "trust-policy: yes\n"
+                                         "x-init-reserved: paths=%s/share/curl/curl-ca-bundle.crt\n",
+                                         res_path, res_path);
+      g_file_replace_contents(cfg_file, buf, strlen(buf), NULL, FALSE, G_FILE_CREATE_NONE, NULL, NULL, NULL);
+      g_free(buf);
+    }
+    g_object_unref(cfg_file);
+  }
+  g_free(file_path);
+#endif
 }
 
 void dt_osx_prepare_environment()
@@ -193,8 +213,11 @@ void dt_osx_prepare_environment()
     g_setenv("GTK_DATA_PREFIX", res_path, TRUE);
     g_setenv("GTK_EXE_PREFIX", res_path, TRUE);
     g_setenv("GTK_PATH", res_path, TRUE);
+
+    gchar* etc_path = g_build_filename(res_path, "etc", NULL);
+    gchar* lib_path = g_build_filename(res_path, "lib", NULL);
+
     {
-      gchar* etc_path = g_build_filename(res_path, "etc", NULL);
       g_setenv("XDG_CONFIG_DIRS", etc_path, TRUE);
       {
         gchar* gtk_im_path = g_build_filename(etc_path, "gtk-3.0", "gtk.immodules", NULL);
@@ -206,7 +229,6 @@ void dt_osx_prepare_environment()
         g_setenv("GDK_PIXBUF_MODULE_FILE", pixbuf_path, TRUE);
         g_free(pixbuf_path);
       }
-      g_free(etc_path);
     }
     {
       gchar* share_path = g_build_filename(res_path, "share", NULL);
@@ -219,7 +241,6 @@ void dt_osx_prepare_environment()
       g_free(share_path);
     }
     {
-      gchar* lib_path = g_build_filename(res_path, "lib", NULL);
       {
         gchar* io_path = g_build_filename(lib_path, "libgphoto2_port", NULL);
         g_setenv("IOLIBS", io_path, TRUE);
@@ -235,8 +256,25 @@ void dt_osx_prepare_environment()
         g_setenv("GIO_MODULE_DIR", gio_path, TRUE);
         g_free(gio_path);
       }
-      g_free(lib_path);
     }
+
+#ifdef HAVE_IMAGEMAGICK7
+    {
+      g_setenv("MAGICK_HOME", res_path, TRUE);
+      gchar* im_config_path = g_build_filename(etc_path, "ImageMagick-7", NULL);
+      g_setenv("MAGICK_CONFIGURE_PATH", im_config_path, TRUE);
+      g_free(im_config_path);
+      gchar* im_modules_path = g_build_filename(lib_path, "ImageMagick", "modules-Q16HDRI", NULL);
+      g_setenv("MAGICK_CODER_MODULE_PATH", im_modules_path, TRUE);
+      g_setenv("MAGICK_CODER_FILTER_PATH", im_modules_path, TRUE);
+      g_free(im_modules_path);
+    }
+#endif
+
+    _setup_ssl_trust(res_path); //uses GIO, so call after GIO_MODULE_DIR is set
+
+    g_free(etc_path);
+    g_free(lib_path);
     g_free(res_path);
   }
 }

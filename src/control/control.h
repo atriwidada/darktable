@@ -30,6 +30,7 @@
 #endif
 
 #include "control/jobs.h"
+#include "control/crawler.h"
 #include "control/progress.h"
 #include "libs/lib.h"
 #include <gtk/gtk.h>
@@ -37,6 +38,8 @@
 #ifdef _WIN32
 #include <shobjidl.h>
 #endif
+
+G_BEGIN_DECLS
 
 struct dt_lib_backgroundjob_element_t;
 
@@ -111,10 +114,11 @@ struct dt_control_t;
 /** sets the hinter message */
 void dt_control_hinter_message(const struct dt_control_t *s, const char *message);
 
-#define DT_CTL_LOG_SIZE 10
+#define DT_CTL_LOG_SIZE 8 // must be power-of-2
+#define DT_CTL_TOAST_SIZE 2
+
 #define DT_CTL_LOG_MSG_SIZE 1000
 #define DT_CTL_LOG_TIMEOUT 5000
-#define DT_CTL_TOAST_SIZE 10
 #define DT_CTL_TOAST_MSG_SIZE 300
 #define DT_CTL_TOAST_TIMEOUT 1500
 /**
@@ -126,9 +130,13 @@ typedef struct dt_control_t
 {
   gboolean accel_initialising;
 
-  dt_action_t *actions, actions_global, actions_views, actions_thumb, actions_libs, actions_iops, actions_blend, actions_lua, actions_fallbacks, *actions_modifiers;
+  dt_action_t *actions, actions_global,
+               actions_views, actions_thumb,
+               actions_libs, actions_format, actions_storage,
+               actions_iops, actions_blend, actions_focus,
+               actions_lua, actions_fallbacks, *actions_modifiers;
 
-  GHashTable *widgets, *combo_introspection, *combo_list;
+  GHashTable *widgets;
   GSequence *shortcuts;
   gboolean enable_fallbacks;
   GtkWidget *mapping_widget;
@@ -147,24 +155,19 @@ typedef struct dt_control_t
   int button_down, button_down_which, button_type;
   double button_x, button_y;
   int history_start;
-  int32_t mouse_over_id;
+  dt_imgid_t mouse_over_id;
+  dt_imgid_t last_clicked_filmstrip_id;
   gboolean lock_cursor_shape;
 
-  // TODO: move these to some darkroom struct
-  // synchronized navigation
-  float dev_zoom_x, dev_zoom_y, dev_zoom_scale;
-  dt_dev_zoom_t dev_zoom;
-  int dev_closeup;
-
   // message log
-  int log_pos, log_ack;
+  int32_t log_pos, log_ack;
   char log_message[DT_CTL_LOG_SIZE][DT_CTL_LOG_MSG_SIZE];
   guint log_message_timeout_id;
   int log_busy;
   dt_pthread_mutex_t log_mutex;
 
   // toast log
-  int toast_pos, toast_ack;
+  int32_t toast_pos, toast_ack;
   char toast_message[DT_CTL_TOAST_SIZE][DT_CTL_TOAST_MSG_SIZE];
   guint toast_message_timeout_id;
   int toast_busy;
@@ -175,7 +178,7 @@ typedef struct dt_control_t
   double last_expose_time;
 
   // job management
-  int32_t running;
+  gboolean running;
   gboolean export_scheduled;
   dt_pthread_mutex_t queue_mutex, cond_mutex, run_mutex;
   pthread_cond_t cond;
@@ -242,41 +245,17 @@ void dt_control_cleanup(dt_control_t *s);
 void dt_control_quit();
 
 /** get threadsafe running state. */
-int dt_control_running();
+gboolean dt_control_running();
 
 // thread-safe interface between core and gui.
 // is the locking really needed?
-int32_t dt_control_get_mouse_over_id();
-void dt_control_set_mouse_over_id(int32_t value);
+dt_imgid_t dt_control_get_mouse_over_id();
+void dt_control_set_mouse_over_id(const dt_imgid_t value);
 
-float dt_control_get_dev_zoom_x();
-void dt_control_set_dev_zoom_x(float value);
+G_END_DECLS
 
-float dt_control_get_dev_zoom_y();
-void dt_control_set_dev_zoom_y(float value);
-
-float dt_control_get_dev_zoom_scale();
-void dt_control_set_dev_zoom_scale(float value);
-
-int dt_control_get_dev_closeup();
-void dt_control_set_dev_closeup(int value);
-
-dt_dev_zoom_t dt_control_get_dev_zoom();
-void dt_control_set_dev_zoom(dt_dev_zoom_t value);
-
-static inline int32_t dt_ctl_get_num_procs()
-{
-#ifdef _OPENMP
-  return omp_get_num_procs();
-#else
-#ifdef _SC_NPROCESSORS_ONLN
-  return sysconf(_SC_NPROCESSORS_ONLN);
-#else
-  return 1;
-#endif
-#endif
-}
-
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

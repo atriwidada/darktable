@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2021 darktable developers.
+    Copyright (C) 2011-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -21,8 +21,6 @@
 #include "common/file_location.h"
 #include "common/image.h"
 #include "common/image_cache.h"
-#include "common/imageio.h"
-#include "common/imageio_module.h"
 #include "common/metadata.h"
 #include "common/utility.h"
 #include "common/variables.h"
@@ -32,6 +30,9 @@
 #include "dtgtk/paint.h"
 #include "gui/gtk.h"
 #include "gui/gtkentry.h"
+#include "gui/accelerators.h"
+#include "imageio/imageio_common.h"
+#include "imageio/imageio_module.h"
 #include "imageio/storage/imageio_storage_api.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
@@ -53,7 +54,10 @@ typedef struct dt_imageio_gallery_t
 {
   char filename[DT_MAX_PATH_FOR_PARAMS];
   char title[1024];
-  char cached_dirname[DT_MAX_PATH_FOR_PARAMS]; // expanded during first img store, not stored in param struct.
+  char cached_dirname[DT_MAX_PATH_FOR_PARAMS]; // expanded during
+                                               // first img store, not
+                                               // stored in param
+                                               // struct.
   dt_variables_params_t *vp;
   GList *l;
 } dt_imageio_gallery_t;
@@ -72,35 +76,72 @@ const char *name(const struct dt_imageio_module_storage_t *self)
   return _("website gallery");
 }
 
-void *legacy_params(dt_imageio_module_storage_t *self, const void *const old_params,
-                    const size_t old_params_size, const int old_version, const int new_version,
+void *legacy_params(dt_imageio_module_storage_t *self,
+                    const void *const old_params,
+                    const size_t old_params_size,
+                    const int old_version,
+                    int *new_version,
                     size_t *new_size)
 {
-  if(old_version == 1 && new_version == 2)
+  typedef struct dt_imageio_gallery_v2_t
+  {
+    char filename[DT_MAX_PATH_FOR_PARAMS];
+    char title[1024];
+    char cached_dirname[DT_MAX_PATH_FOR_PARAMS]; // expanded during
+                                                 // first img store, not
+                                                 // stored in param struct.
+    dt_variables_params_t *vp;
+    GList *l;
+  } dt_imageio_gallery_v2_t;
+
+  if(old_version == 1)
   {
     typedef struct dt_imageio_gallery_v1_t
     {
       char filename[1024];
       char title[1024];
-      char cached_dirname[1024]; // expanded during first img store, not stored in param struct.
+      char cached_dirname[1024]; // expanded during first img store,
+                                 // not stored in param struct.
       dt_variables_params_t *vp;
       GList *l;
     } dt_imageio_gallery_v1_t;
 
-    dt_imageio_gallery_t *n = (dt_imageio_gallery_t *)malloc(sizeof(dt_imageio_gallery_t));
-    dt_imageio_gallery_v1_t *o = (dt_imageio_gallery_v1_t *)old_params;
+    const dt_imageio_gallery_v1_t *o = (dt_imageio_gallery_v1_t *)old_params;
+    dt_imageio_gallery_v2_t *n =
+      (dt_imageio_gallery_v2_t *)malloc(sizeof(dt_imageio_gallery_v2_t));
 
     g_strlcpy(n->filename, o->filename, sizeof(n->filename));
     g_strlcpy(n->title, o->title, sizeof(n->title));
     g_strlcpy(n->cached_dirname, o->cached_dirname, sizeof(n->cached_dirname));
 
-    *new_size = self->params_size(self);
+    *new_version = 2;
+    *new_size = sizeof(dt_imageio_gallery_v2_t)
+                - 2 * sizeof(void *) - DT_MAX_PATH_FOR_PARAMS;
     return n;
   }
+
+  // incremental update supported:
+  /*
+  typedef struct dt_imageio_gallery_v3_t
+  {
+    ...
+  } dt_imageio_gallery_v3_t;
+
+  if(old_version == 2)
+  {
+    // let's update from 2 to 3
+
+    ...
+    *new_size = sizeof(dt_imageio_gallery_v3_t) - 2 * sizeof(void *) - DT_MAX_PATH_FOR_PARAMS;
+    *new_version = 3;
+    return n;
+  }
+  */
   return NULL;
 }
 
-static void button_clicked(GtkWidget *widget, dt_imageio_module_storage_t *self)
+static void button_clicked(GtkWidget *widget,
+                           dt_imageio_module_storage_t *self)
 {
   gallery_t *d = (gallery_t *)self->gui_data;
   GtkWidget *win = dt_ui_main_window(darktable.gui->ui);
@@ -116,14 +157,15 @@ static void button_clicked(GtkWidget *widget, dt_imageio_module_storage_t *self)
   if(gtk_native_dialog_run(GTK_NATIVE_DIALOG(filechooser)) == GTK_RESPONSE_ACCEPT)
   {
     gchar *dir = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(filechooser));
-    char *composed = g_build_filename(dir, "$(FILE_NAME)", NULL);
+    char *composed = g_build_filename(dir, "$(FILE.NAME)", NULL);
 
     // composed can now contain '\': on Windows it's the path separator,
     // on other platforms it can be part of a regular folder name.
     // This would later clash with variable substitution, so we have to escape them
     gchar *escaped = dt_util_str_replace(composed, "\\", "\\\\");
 
-    gtk_entry_set_text(GTK_ENTRY(d->entry), escaped); // the signal handler will write this to conf
+    gtk_entry_set_text(GTK_ENTRY(d->entry), escaped);
+    // the signal handler will write this to conf
     g_free(dir);
     g_free(composed);
     g_free(escaped);
@@ -131,14 +173,18 @@ static void button_clicked(GtkWidget *widget, dt_imageio_module_storage_t *self)
   g_object_unref(filechooser);
 }
 
-static void entry_changed_callback(GtkEntry *entry, gpointer user_data)
+static void entry_changed_callback(GtkEntry *entry,
+                                   gpointer user_data)
 {
-  dt_conf_set_string("plugins/imageio/storage/gallery/file_directory", gtk_entry_get_text(entry));
+  dt_conf_set_string("plugins/imageio/storage/gallery/file_directory",
+                     gtk_entry_get_text(entry));
 }
 
-static void title_changed_callback(GtkEntry *entry, gpointer user_data)
+static void title_changed_callback(GtkEntry *entry,
+                                   gpointer user_data)
 {
-  dt_conf_set_string("plugins/imageio/storage/gallery/title", gtk_entry_get_text(entry));
+  dt_conf_set_string("plugins/imageio/storage/gallery/title",
+                     gtk_entry_get_text(entry));
 }
 
 void gui_init(dt_imageio_module_storage_t *self)
@@ -150,22 +196,17 @@ void gui_init(dt_imageio_module_storage_t *self)
   gtk_box_pack_start(GTK_BOX(self->widget), hbox, TRUE, TRUE, 0);
   GtkWidget *widget;
 
-  widget = gtk_entry_new();
-  gtk_entry_set_width_chars(GTK_ENTRY(widget), 0);
-  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
-  const char *dir = dt_conf_get_string_const("plugins/imageio/storage/gallery/file_directory");
-  if(dir)
-  {
-    gtk_entry_set_text(GTK_ENTRY(widget), dir);
-  }
-  d->entry = GTK_ENTRY(widget);
-
-  dt_gtkentry_setup_completion(GTK_ENTRY(widget), dt_gtkentry_get_default_path_compl_list());
-
-  gtk_widget_set_tooltip_text(widget,
-      _("enter the path where to put exported images\nvariables support bash like string manipulation\n"
-        "type '$(' to activate the completion and see the list of variables"));
-  g_signal_connect(G_OBJECT(widget), "changed", G_CALLBACK(entry_changed_callback), self);
+  d->entry =
+    GTK_ENTRY
+    (dt_action_entry_new
+     (DT_ACTION(self), N_("path"),
+      G_CALLBACK(entry_changed_callback), self,
+      _("enter the path where to put exported images\nvariables support bash like"
+        " string manipulation\n"
+        "type '$(' to activate the completion and see the list of variables"),
+      dt_conf_get_string_const("plugins/imageio/storage/gallery/file_directory")));
+  dt_gtkentry_setup_completion(d->entry, dt_gtkentry_get_default_path_compl_list());
+  gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(d->entry), TRUE, TRUE, 0);
 
   widget = dtgtk_button_new(dtgtk_cairo_paint_directory, CPF_NONE, NULL);
   gtk_widget_set_name(widget, "non-flat");
@@ -176,16 +217,13 @@ void gui_init(dt_imageio_module_storage_t *self)
   hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_box_pack_start(GTK_BOX(self->widget), hbox, TRUE, TRUE, 0);
   gtk_box_pack_start(GTK_BOX(hbox), dt_ui_label_new(_("title")), FALSE, FALSE, 0);
-  d->title_entry = GTK_ENTRY(gtk_entry_new());
-  gtk_entry_set_width_chars(d->title_entry, 0);
+  d->title_entry =
+    GTK_ENTRY(dt_action_entry_new
+              (DT_ACTION(self), N_("title"),
+               G_CALLBACK(title_changed_callback), self,
+               _("enter the title of the website"),
+               dt_conf_get_string_const("plugins/imageio/storage/gallery/title")));
   gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(d->title_entry), TRUE, TRUE, 0);
-  gtk_widget_set_tooltip_text(GTK_WIDGET(d->title_entry), _("enter the title of the website"));
-  dir = dt_conf_get_string_const("plugins/imageio/storage/gallery/title");
-  if(dir)
-  {
-    gtk_entry_set_text(GTK_ENTRY(d->title_entry), dir);
-  }
-  g_signal_connect(G_OBJECT(d->title_entry), "changed", G_CALLBACK(title_changed_callback), self);
 }
 
 void gui_cleanup(dt_imageio_module_storage_t *self)
@@ -196,10 +234,18 @@ void gui_cleanup(dt_imageio_module_storage_t *self)
 void gui_reset(dt_imageio_module_storage_t *self)
 {
   gallery_t *d = (gallery_t *)self->gui_data;
-  gtk_entry_set_text(d->entry, dt_confgen_get("plugins/imageio/storage/gallery/file_directory", DT_DEFAULT));
-  gtk_entry_set_text(d->title_entry, dt_confgen_get("plugins/imageio/storage/gallery/title", DT_DEFAULT));
-  dt_conf_set_string("plugins/imageio/storage/gallery/file_directory", gtk_entry_get_text(d->entry));
-  dt_conf_set_string("plugins/imageio/storage/gallery/title", gtk_entry_get_text(d->title_entry));
+  gtk_entry_set_text
+    (d->entry,
+     dt_confgen_get("plugins/imageio/storage/gallery/file_directory",
+                    DT_DEFAULT));
+
+  gtk_entry_set_text(d->title_entry,
+                     dt_confgen_get("plugins/imageio/storage/gallery/title",
+                                    DT_DEFAULT));
+  dt_conf_set_string("plugins/imageio/storage/gallery/file_directory",
+                     gtk_entry_get_text(d->entry));
+  dt_conf_set_string("plugins/imageio/storage/gallery/title",
+                     gtk_entry_get_text(d->title_entry));
 }
 
 static gint sort_pos(pair_t *a, pair_t *b)
@@ -207,18 +253,26 @@ static gint sort_pos(pair_t *a, pair_t *b)
   return a->pos - b->pos;
 }
 
-int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, const int imgid,
-          dt_imageio_module_format_t *format, dt_imageio_module_data_t *fdata, const int num, const int total,
-          const gboolean high_quality, const gboolean upscale, const gboolean export_masks,
-          dt_colorspaces_color_profile_type_t icc_type, const gchar *icc_filename, dt_iop_color_intent_t icc_intent,
+int store(dt_imageio_module_storage_t *self,
+          dt_imageio_module_data_t *sdata,
+          const dt_imgid_t imgid,
+          dt_imageio_module_format_t *format,
+          dt_imageio_module_data_t *fdata,
+          const int num,
+          const int total,
+          const gboolean high_quality,
+          const gboolean upscale,
+          const gboolean export_masks,
+          dt_colorspaces_color_profile_type_t icc_type,
+          const gchar *icc_filename,
+          dt_iop_color_intent_t icc_intent,
           dt_export_metadata_t *metadata)
 {
   dt_imageio_gallery_t *d = (dt_imageio_gallery_t *)sdata;
 
   char filename[PATH_MAX] = { 0 };
   char dirname[PATH_MAX] = { 0 };
-  gboolean from_cache = FALSE;
-  dt_image_full_path(imgid, dirname, sizeof(dirname), &from_cache);
+  dt_image_full_path(imgid, dirname, sizeof(dirname), NULL);
 
   char tmp_dir[PATH_MAX] = { 0 };
 
@@ -235,16 +289,18 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
   g_strlcpy(tmp_dir, result_tmp_dir, sizeof(tmp_dir));
   g_free(result_tmp_dir);
 
-  // if filenamepattern is a directory just let att ${FILE_NAME} as default..
+  // if filenamepattern is a directory just add ${FILE.NAME} as default..
   if(g_file_test(tmp_dir, G_FILE_TEST_IS_DIR)
      || ((d->filename + strlen(d->filename) - 1)[0] == '/'
-         || (d->filename + strlen(d->filename) - 1)[0] == '\\'))
-    snprintf(d->filename + strlen(d->filename), sizeof(d->filename) - strlen(d->filename), "/$(FILE_NAME)");
+         || (d->filename + strlen(d->filename) - 1)[0] == G_DIR_SEPARATOR))
+    snprintf(d->filename + strlen(d->filename),
+             sizeof(d->filename) - strlen(d->filename), "/$(FILE.NAME)");
 
   // avoid braindead export which is bound to overwrite at random:
   if(total > 1 && !g_strrstr(d->filename, "$"))
   {
-    snprintf(d->filename + strlen(d->filename), sizeof(d->filename) - strlen(d->filename), "_$(SEQUENCE)");
+    snprintf(d->filename + strlen(d->filename),
+             sizeof(d->filename) - strlen(d->filename), "_$(SEQUENCE)");
   }
 
   gchar *fixed_path = dt_util_fix_path(d->filename);
@@ -259,12 +315,13 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
 
   const char *ext = format->extension(fdata);
   char *c = dirname + strlen(dirname);
-  for(; c > dirname && *c != '/'; c--)
+  for(; c > dirname && *c != '/' && *c != G_DIR_SEPARATOR; c--)
     ;
-  if(*c == '/') *c = '\0';
+  if(*c == '/' || *c == G_DIR_SEPARATOR) *c = '\0';
   if(g_mkdir_with_parents(dirname, 0755))
   {
-    fprintf(stderr, "[imageio_storage_gallery] could not create directory: `%s'!\n", dirname);
+    dt_print(DT_DEBUG_ALWAYS,
+             "[imageio_storage_gallery] could not create directory: `%s'!\n", dirname);
     dt_control_log(_("could not create directory `%s'!"), dirname);
     return 1;
   }
@@ -273,9 +330,9 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
   g_strlcpy(d->cached_dirname, dirname, sizeof(d->cached_dirname));
 
   c = filename + strlen(filename);
-  for(; c > filename && *c != '.' && *c != '/'; c--)
+  for(; c > filename && *c != '.' && *c != '/' && *c != G_DIR_SEPARATOR; c--)
     ;
-  if(c <= filename || *c == '/') c = filename + strlen(filename);
+  if(c <= filename || *c == '/' || *c == G_DIR_SEPARATOR) c = filename + strlen(filename);
 
   sprintf(c, ".%s", ext);
 
@@ -285,7 +342,7 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
   char *title = NULL, *description = NULL;
   GList *res_title = NULL, *res_desc = NULL;
 
-  if ((metadata->flags & DT_META_METADATA) && !(metadata->flags & DT_META_CALCULATED))
+  if((metadata->flags & DT_META_METADATA) && !(metadata->flags & DT_META_CALCULATED))
   {
     res_title = dt_metadata_get(imgid, "Xmp.dc.title", NULL);
     if(res_title)
@@ -320,7 +377,8 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
   sprintf(sc, "/img_%d.html", num);
   snprintf(relsubfilename, sizeof(relsubfilename), "img_%d.html", num);
 
-  // escape special character and especially " which is used in <img> and below in src and msrc
+  // escape special character and especially " which is used in <img>
+  // and below in src and msrc
 
   gchar *esc_relfilename = g_strescape(relfilename, NULL);
   gchar *esc_relthumbfilename = g_strescape(relthumbfilename, NULL);
@@ -334,15 +392,19 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
            esc_relthumbfilename,
            num, num-1, title ? title : "&nbsp;", description ? description : "&nbsp;");
 
-  if(res_title) g_list_free_full(res_title, &g_free);
-  if(res_desc) g_list_free_full(res_desc, &g_free);
+  if(res_title)
+    g_list_free_full(res_title, &g_free);
+  if(res_desc)
+    g_list_free_full(res_desc, &g_free);
 
   // export image to file. need this to be able to access meaningful
   // fdata->width and height below.
-  if(dt_imageio_export(imgid, filename, format, fdata, high_quality, upscale, TRUE, export_masks, icc_type,
+  if(dt_imageio_export(imgid, filename, format, fdata, high_quality,
+                       upscale, TRUE, export_masks, icc_type,
                        icc_filename, icc_intent, self, sdata, num, total, metadata) != 0)
   {
-    fprintf(stderr, "[imageio_storage_gallery] could not export to file: `%s'!\n", filename);
+    dt_print(DT_DEBUG_ALWAYS,
+             "[imageio_storage_gallery] could not export to file: `%s'!\n", filename);
     dt_control_log(_("could not export to file `%s'!"), filename);
     free(pair);
     g_free(esc_relfilename);
@@ -364,7 +426,6 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
 
   pair->pos = num;
   d->l = g_list_insert_sorted(d->l, pair, (GCompareFunc)sort_pos);
-  free(pair);
 
   /* also export thumbnail: */
   // write with reduced resolution:
@@ -379,10 +440,12 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
   if(c <= filename || *c == '/') c = filename + strlen(filename);
   ext = format->extension(fdata);
   sprintf(c, "-thumb.%s", ext);
-  if(dt_imageio_export(imgid, filename, format, fdata, FALSE, TRUE, FALSE, export_masks, icc_type, icc_filename,
+  if(dt_imageio_export(imgid, filename, format, fdata, FALSE, TRUE, FALSE,
+                       export_masks, icc_type, icc_filename,
                        icc_intent, self, sdata, num, total, NULL) != 0)
   {
-    fprintf(stderr, "[imageio_storage_gallery] could not export to file: `%s'!\n", filename);
+    dt_print(DT_DEBUG_ALWAYS,
+             "[imageio_storage_gallery] could not export to file: `%s'!\n", filename);
     dt_control_log(_("could not export to file `%s'!"), filename);
     return 1;
   }
@@ -390,7 +453,7 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
   fdata->max_width = save_max_width;
   fdata->max_height = save_max_height;
 
-  printf("[export_job] exported to `%s'\n", filename);
+  dt_print(DT_DEBUG_ALWAYS, "[export_job] exported to `%s'\n", filename);
   dt_control_log(ngettext("%d/%d exported to `%s'", "%d/%d exported to `%s'", num),
                  num, total, filename);
   return 0;
@@ -547,20 +610,24 @@ size_t params_size(dt_imageio_module_storage_t *self)
 void init(dt_imageio_module_storage_t *self)
 {
 #ifdef USE_LUA
-  dt_lua_register_module_member(darktable.lua_state.state, self, dt_imageio_gallery_t, filename,
+  dt_lua_register_module_member(darktable.lua_state.state, self,
+                                dt_imageio_gallery_t, filename,
                                 char_path_length);
-  dt_lua_register_module_member(darktable.lua_state.state, self, dt_imageio_gallery_t, title, char_1024);
+  dt_lua_register_module_member(darktable.lua_state.state, self,
+                                dt_imageio_gallery_t, title, char_1024);
 #endif
 }
 
 void *get_params(dt_imageio_module_storage_t *self)
 {
-  dt_imageio_gallery_t *d = (dt_imageio_gallery_t *)calloc(1, sizeof(dt_imageio_gallery_t));
+  dt_imageio_gallery_t *d =
+    (dt_imageio_gallery_t *)calloc(1, sizeof(dt_imageio_gallery_t));
   d->vp = NULL;
   d->l = NULL;
   dt_variables_params_init(&d->vp);
 
-  const char *text = dt_conf_get_string_const("plugins/imageio/storage/gallery/file_directory");
+  const char *text =
+    dt_conf_get_string_const("plugins/imageio/storage/gallery/file_directory");
   g_strlcpy(d->filename, text, sizeof(d->filename));
 
   text = dt_conf_get_string_const("plugins/imageio/storage/gallery/title");
@@ -569,7 +636,8 @@ void *get_params(dt_imageio_module_storage_t *self)
   return d;
 }
 
-void free_params(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *params)
+void free_params(dt_imageio_module_storage_t *self,
+                 dt_imageio_module_data_t *params)
 {
   if(!params) return;
   dt_imageio_gallery_t *d = (dt_imageio_gallery_t *)params;
@@ -577,7 +645,9 @@ void free_params(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *pa
   free(params);
 }
 
-int set_params(dt_imageio_module_storage_t *self, const void *params, const int size)
+int set_params(dt_imageio_module_storage_t *self,
+               const void *params,
+               const int size)
 {
   if(size != self->params_size(self)) return 1;
   dt_imageio_gallery_t *d = (dt_imageio_gallery_t *)params;
@@ -589,20 +659,21 @@ int set_params(dt_imageio_module_storage_t *self, const void *params, const int 
   return 0;
 }
 
-int supported(dt_imageio_module_storage_t *storage, dt_imageio_module_format_t *format)
+gboolean supported(dt_imageio_module_storage_t *storage,
+                   dt_imageio_module_format_t *format)
 {
   const char *mime = format->mime(NULL);
-  if(strcmp(mime, "image/jpeg") == 0)
-    return 1;
-  if(strcmp(mime, "image/png") == 0)
-    return 1;
-  if(strcmp(mime, "image/webp") == 0)
-    return 1;
-  if (strcmp(mime, "image/avif") == 0) return 1;
+  if(strcmp(mime, "image/jpeg") == 0) return TRUE;
+  if(strcmp(mime, "image/png") == 0) return TRUE;
+  if(strcmp(mime, "image/webp") == 0) return TRUE;
+  if(strcmp(mime, "image/avif") == 0) return TRUE;
+  if(strcmp(mime, "image/jxl") == 0) return TRUE;
 
-  return 0;
+  return FALSE;
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on

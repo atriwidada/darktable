@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2021 darktable developers.
+    Copyright (C) 2011-2024 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -23,6 +23,7 @@
 #include "common/atomic.h"
 #include "common/database.h"
 #include "common/darktable.h"
+#include "common/datetime.h"
 #include "common/debug.h"
 #include "common/file_location.h"
 #include "common/iop_order.h"
@@ -33,7 +34,6 @@
 #endif
 #include "control/conf.h"
 #include "control/control.h"
-#include "gui/legacy_presets.h"
 
 #include <gio/gio.h>
 #include <glib.h>
@@ -48,11 +48,11 @@
 
 // whenever _create_*_schema() gets changed you HAVE to bump this version and add an update path to
 // _upgrade_*_schema_step()!
-#define CURRENT_DATABASE_VERSION_LIBRARY 34
-#define CURRENT_DATABASE_VERSION_DATA     9
+#define CURRENT_DATABASE_VERSION_LIBRARY 55
+#define CURRENT_DATABASE_VERSION_DATA    10
 
-// #define USE_NESTED_TRANSACTIONS
-#define MAX_NESTED_TRANSACTIONS 0
+#define USE_NESTED_TRANSACTIONS
+#define MAX_NESTED_TRANSACTIONS 5
 /* transaction id */
 static dt_atomic_int _trxid;
 
@@ -88,7 +88,13 @@ static void _database_delete_mipmaps_files();
     goto end;                                                                                                \
   }
 
-/* migrate from the legacy db format (with the 'settings' blob) to the first version this system knows */
+int32_t dt_database_last_insert_rowid(const dt_database_t *db)
+{
+  return (int32_t)sqlite3_last_insert_rowid(db->handle);
+}
+
+/* migrate from the legacy db format (with the 'settings' blob) to the
+   first version this system knows */
 static gboolean _migrate_schema(dt_database_t *db, int version)
 {
   gboolean all_ok = TRUE;
@@ -100,7 +106,7 @@ static gboolean _migrate_schema(dt_database_t *db, int version)
     return FALSE;
 
   sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+  // clang-format off
   // remove stuff that is either no longer needed or that got renamed
   _SQLITE3_EXEC(db->handle, "DROP TABLE IF EXISTS main.lock", NULL, NULL, NULL);
   _SQLITE3_EXEC(db->handle, "DROP TABLE IF EXISTS main.settings", NULL, NULL, NULL); // yes, we do this in many
@@ -280,6 +286,7 @@ static gboolean _migrate_schema(dt_database_t *db, int version)
                      "FROM main.presets GROUP BY name, operation, op_version) WHERE count > 1) s "
                      "ON p.name = s.name AND p.operation = s.operation AND p.op_version = s.op_version",
                      -1, &stmt, NULL);
+  // clang-format on
   char *last_name = NULL, *last_operation = NULL;
   int last_op_version = 0;
   int i = 0;
@@ -303,9 +310,11 @@ static gboolean _migrate_schema(dt_database_t *db, int version)
     }
 
     // find the next free amended version of name
+    // clang-format off
     sqlite3_prepare_v2(db->handle, "SELECT name FROM main.presets  WHERE name = ?1 || ' (' || ?2 || ')' AND "
                                    "operation = ?3 AND op_version = ?4",
                        -1, &innerstmt, NULL);
+    // clang-format on
     while(1)
     {
       sqlite3_bind_text(innerstmt, 1, name, -1, SQLITE_TRANSIENT);
@@ -320,7 +329,9 @@ static gboolean _migrate_schema(dt_database_t *db, int version)
     sqlite3_finalize(innerstmt);
 
     // rename preset
+    // clang-format off
     const char *query = "UPDATE main.presets SET name = name || ' (' || ?1 || ')' WHERE rowid = ?2";
+    // clang-format on
     sqlite3_prepare_v2(db->handle, query, -1, &innerstmt, NULL);
     sqlite3_bind_int(innerstmt, 1, i);
     sqlite3_bind_int(innerstmt, 2, rowid);
@@ -336,6 +347,7 @@ static gboolean _migrate_schema(dt_database_t *db, int version)
   g_free(last_name);
   g_free(last_operation);
   // now we should be able to create the index
+  // clang-format off
   _SQLITE3_EXEC(db->handle,
                 "CREATE UNIQUE INDEX IF NOT EXISTS main.presets_idx ON presets (name, operation, op_version)",
                 NULL, NULL, NULL);
@@ -344,13 +356,16 @@ static gboolean _migrate_schema(dt_database_t *db, int version)
   _SQLITE3_EXEC(db->handle, "UPDATE main.presets SET multi_priority = 0 WHERE multi_priority IS NULL", NULL, NULL,
                 NULL);
   _SQLITE3_EXEC(db->handle, "UPDATE main.presets SET multi_name = ' ' WHERE multi_name IS NULL", NULL, NULL, NULL);
+  // clang-format on
 
 
   // There are systems where absolute paths don't start with '/' (like Windows).
   // Since the bug which introduced absolute paths to the db was fixed before a
   // Windows build was available this shouldn't matter though.
+  // clang-format off
   sqlite3_prepare_v2(db->handle, "SELECT id, filename FROM main.images WHERE filename LIKE '/%'", -1, &stmt, NULL);
   sqlite3_prepare_v2(db->handle, "UPDATE main.images SET filename = ?1 WHERE id = ?2", -1, &innerstmt, NULL);
+  // clang-format on
   while(sqlite3_step(stmt) == SQLITE_ROW)
   {
     const int id = sqlite3_column_int(stmt, 0);
@@ -369,18 +384,20 @@ static gboolean _migrate_schema(dt_database_t *db, int version)
   // We used to insert datetime_taken entries with '-' as date separators. Since that doesn't work well with
   // the regular ':' when parsing
   // or sorting we changed it to ':'. This takes care to change what we have as leftovers
+  // clang-format off
   _SQLITE3_EXEC(
       db->handle,
       "UPDATE main.images SET datetime_taken = REPLACE(datetime_taken, '-', ':') WHERE datetime_taken LIKE '%-%'",
       NULL, NULL, NULL);
+  // clang-format on
 
 end:
   if(all_ok)
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
   else
   {
-    fprintf(stderr, "[init] failing query: `%s'\n", failing_query);
-    fprintf(stderr, "[init]   %s\n", sqlite3_errmsg(db->handle));
+    dt_print(DT_DEBUG_ALWAYS, "[init] failing query: `%s'\n", failing_query);
+    dt_print(DT_DEBUG_ALWAYS, "[init]   %s\n", sqlite3_errmsg(db->handle));
     sqlite3_exec(db->handle, "ROLLBACK TRANSACTION", NULL, NULL, NULL);
   }
 
@@ -394,8 +411,8 @@ end:
   {                                                                              \
     if(sqlite3_exec(db->handle, _query, NULL, NULL, NULL) != SQLITE_OK)          \
     {                                                                            \
-      fprintf(stderr, _message);                                                 \
-      fprintf(stderr, "[init]   %s\n", sqlite3_errmsg(db->handle));              \
+      dt_print(DT_DEBUG_ALWAYS, _message);                                       \
+      dt_print(DT_DEBUG_ALWAYS, "[init]   %s\n", sqlite3_errmsg(db->handle));    \
       FINALIZE;                                                                  \
       sqlite3_exec(db->handle, "ROLLBACK TRANSACTION", NULL, NULL, NULL);        \
       return version;                                                            \
@@ -407,8 +424,8 @@ end:
   {                                                                              \
     if(sqlite3_step(_stmt) != _expected)                                         \
     {                                                                            \
-      fprintf(stderr, _message);                                                 \
-      fprintf(stderr, "[init]   %s\n", sqlite3_errmsg(db->handle));              \
+      dt_print(DT_DEBUG_ALWAYS, _message);                                       \
+      dt_print(DT_DEBUG_ALWAYS, "[init]   %s\n", sqlite3_errmsg(db->handle));    \
       FINALIZE;                                                                  \
       sqlite3_exec(db->handle, "ROLLBACK TRANSACTION", NULL, NULL, NULL);        \
       return version;                                                            \
@@ -420,8 +437,8 @@ end:
   {                                                                              \
     if(sqlite3_prepare_v2(db->handle, _query, -1, &_stmt, NULL) != SQLITE_OK)    \
     {                                                                            \
-      fprintf(stderr, _message);                                                 \
-      fprintf(stderr, "[init]   %s\n", sqlite3_errmsg(db->handle));              \
+      dt_print(DT_DEBUG_ALWAYS, _message);                                       \
+      dt_print(DT_DEBUG_ALWAYS, "[init]   %s\n", sqlite3_errmsg(db->handle));    \
       FINALIZE;                                                                  \
       sqlite3_exec(db->handle, "ROLLBACK TRANSACTION", NULL, NULL, NULL);        \
       return version;                                                            \
@@ -449,10 +466,12 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     // 1 -> 2 added write_timestamp
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+    // clang-format off
     TRY_EXEC("ALTER TABLE main.images ADD COLUMN write_timestamp INTEGER",
              "[init] can't add `write_timestamp' column to database\n");
     TRY_EXEC("UPDATE main.images SET write_timestamp = STRFTIME('%s', 'now') WHERE write_timestamp IS NULL",
              "[init] can't initialize `write_timestamp' with current point in time\n");
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 2;
   }
@@ -461,15 +480,17 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     // 2 -> 3 reset raw_black and raw_maximum. in theory we should change the columns from REAL to INTEGER,
     // but sqlite doesn't care about types so whatever
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+    // clang-format off
     TRY_EXEC("UPDATE main.images SET raw_black = 0, raw_maximum = 16384",
              "[init] can't reset raw_black and raw_maximum\n");
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 3;
   }
   else if(version == 3)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("CREATE TRIGGER insert_tag AFTER INSERT ON main.tags"
              " BEGIN"
              "   INSERT INTO tagxtag SELECT id, new.id, 0 FROM TAGS;"
@@ -498,14 +519,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
              "        OR (id2=old.tagid AND id1 IN (SELECT tagid FROM tagged_images WHERE imgid=old.imgid));"
              " END",
              "[init] can't create detach_tag trigger\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 4;
   }
   else if(version == 4)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("ALTER TABLE main.presets RENAME TO tmp_presets",  "[init] can't rename table presets\n");
 
     TRY_EXEC("CREATE TABLE main.presets (name VARCHAR, description VARCHAR, operation VARCHAR, op_params BLOB,"
@@ -526,17 +547,17 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
              "[init] can't populate presets table from tmp_presets\n");
 
     TRY_EXEC("DROP TABLE tmp_presets", "[init] can't delete table tmp_presets\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 5;
   }
   else if(version == 5)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("CREATE INDEX main.images_filename_index ON images (filename)",
              "[init] can't create index on image filename\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 6;
   }
@@ -547,6 +568,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
 
     if(sqlite3_exec(db->handle, "SELECT style_id FROM main.style_items", NULL, NULL, NULL) == SQLITE_OK)
     {
+      // clang-format off
       TRY_EXEC("ALTER TABLE main.style_items RENAME TO tmp_style_items",
                "[init] can't rename table style_items\n");
 
@@ -563,6 +585,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
                "[init] can't populate style_items table from tmp_style_items\n");
 
       TRY_EXEC("DROP TABLE tmp_style_items", "[init] can't delete table tmp_style_items\n");
+      // clang-format on
     }
 
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
@@ -572,7 +595,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     // make sure that we have no film rolls with a NULL folder
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("ALTER TABLE main.film_rolls RENAME TO tmp_film_rolls", "[init] can't rename table film_rolls\n");
 
     TRY_EXEC("CREATE TABLE main.film_rolls "
@@ -587,7 +610,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
              "[init] can't populate film_rolls table from tmp_film_rolls\n");
 
     TRY_EXEC("DROP TABLE tmp_film_rolls", "[init] can't delete table tmp_film_rolls\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 8;
   }
@@ -595,13 +618,13 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     // 8 -> 9 added history_end column to images
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("ALTER TABLE main.images ADD COLUMN history_end INTEGER",
              "[init] can't add `history_end' column to database\n");
 
     TRY_EXEC("UPDATE main.images SET history_end = (SELECT IFNULL(MAX(num) + 1, 0) FROM main.history "
              "WHERE imgid = id)", "[init] can't initialize `history_end' with last history entry\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 9;
   }
@@ -609,10 +632,10 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     // 9 -> 10 cleanup of last update :(
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("UPDATE main.images SET history_end = (SELECT IFNULL(MAX(num) + 1, 0) FROM main.history "
              "WHERE imgid = id)", "[init] can't set `history_end' to 0 where it was NULL\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 10;
   }
@@ -620,12 +643,12 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     // 10 -> 11 added altitude column to images
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("ALTER TABLE main.images ADD COLUMN altitude REAL",
              "[init] can't add `altitude' column to database\n");
 
     TRY_EXEC("UPDATE main.images SET altitude = NULL", "[init] can't initialize `altitude' with NULL\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 11;
   }
@@ -633,7 +656,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     // 11 -> 12 tagxtag was removed in order to reduce database size
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("DROP TRIGGER main.detach_tag", "[init] can't drop trigger `detach_tag' from database\n");
 
     TRY_EXEC("DROP TRIGGER main.attach_tag", "[init] can't drop trigger `attach_tag' from database\n");
@@ -643,7 +666,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     TRY_EXEC("DROP TRIGGER main.insert_tag", "[init] can't drop trigger `insert_tag' from database\n");
 
     TRY_EXEC("DROP TABLE main.tagxtag", "[init] can't drop table `tagxtag' from database\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 12;
   }
@@ -668,6 +691,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     stmt = NULL;
     sqlite3_stmt *insert_stmt = NULL, *delete_stmt = NULL, *select_stmt = NULL, *count_clashes_stmt = NULL,
     *update_name_stmt = NULL;
+    // clang-format off
     // remove presets that are already in data.
     // we can't use a NATURAL JOIN here as that fails when columns have NULL values. :-(
     TRY_EXEC("DELETE FROM main.presets WHERE rowid IN (SELECT p1.rowid FROM main.presets p1 "
@@ -737,7 +761,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
                 "[init] can't prepare insertion statement\n");
 
     TRY_PREPARE(delete_stmt, "DELETE FROM main.presets WHERE rowid = ?1", "[init] can't prepare deletion statement\n");
-
+    // clang-format on
     // first rename presets with (name, operation, op_version) not being unique
     while(sqlite3_step(select_stmt) == SQLITE_ROW)
     {
@@ -782,7 +806,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
       sqlite3_bind_int(delete_stmt, 1, rowid);
       TRY_STEP(delete_stmt, SQLITE_DONE, "[init] can't delete preset from database\n");
     }
-
+    // clang-format off
     // all that is left in presets should be those that can be moved over without any further concerns
     TRY_EXEC("INSERT OR FAIL INTO data.presets SELECT name, description, operation, "
              "op_version, op_params, enabled, blendop_params, blendop_version, "
@@ -794,6 +818,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     // ... delete them on the old side
     TRY_EXEC("DELETE FROM main.presets WHERE writeprotect = 0",
              "[init] can't copy presets to the data database\n");
+    // clang-format on
 
     FINALIZE;
 #undef FINALIZE
@@ -818,7 +843,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     insert_stmt = NULL;
     delete_stmt = NULL;
     sqlite3_stmt *select_new_stmt = NULL, *copy_style_items_stmt = NULL, *delete_style_items_stmt = NULL;
-
+    // clang-format off
     TRY_PREPARE(stmt, "SELECT id, name FROM main.styles", "[init] can't prepare style selection from database\n");
     TRY_PREPARE(select_stmt, "SELECT rowid FROM data.styles WHERE name = ?1 LIMIT 1",
                 "[init] can't prepare style item selection from database\n");
@@ -841,7 +866,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
                 "[init] can't prepare style item copy into data database\n");
     TRY_PREPARE(delete_style_items_stmt, "DELETE FROM main.style_items WHERE styleid = ?1",
                 "[init] can't prepare style item deletion for database\n");
-
+    // clang-format on
     while(sqlite3_step(stmt) == SQLITE_ROW)
     {
       const int id = sqlite3_column_int(stmt, 0);
@@ -914,7 +939,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
 
     ////////////// tags
 #define FINALIZE
-
+    // clang-format off
     // tags
     TRY_EXEC("INSERT OR IGNORE INTO data.tags (name, icon, description, flags) "
              "SELECT name, icon, description, flags FROM main.tags",
@@ -942,14 +967,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     TRY_EXEC("DROP TABLE main.style_items", "[init] can't drop table `style_items' from database\n");
     TRY_EXEC("DROP TABLE main.styles", "[init] can't drop table `styles' from database\n");
     TRY_EXEC("DROP TABLE main.tags", "[init] can't drop table `tags' from database\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 13;
   } else if(version == 13)
   {
     // 12 -> 13 bring back the used tag names to library.db so people can use it independently of data.db
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("CREATE TABLE main.used_tags (id INTEGER, name VARCHAR NOT NULL)",
              "[init] can't create `used_tags` table\n");
 
@@ -959,7 +984,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     TRY_EXEC("INSERT INTO main.used_tags (id, name) SELECT t.id, t.name FROM data.tags AS t, main.tagged_images "
              "AS i ON t.id = i.tagid GROUP BY t.id",
              "[init] can't insert used tags into `used_tags` table in database\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 14;
   }
@@ -967,7 +992,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     // 13 -> fix the index on used_tags to be a UNIQUE index :-/
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("DELETE FROM main.used_tags WHERE rowid NOT IN (SELECT rowid FROM used_tags GROUP BY id)",
              "[init] can't delete duplicated entries from `used_tags' in database\n");
 
@@ -981,7 +1006,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
 
     TRY_EXEC("DELETE FROM main.used_tags WHERE id NOT IN (SELECT DISTINCT tagid FROM main.tagged_images)",
              "[init] can't delete unused tags from `used_tags' in database\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 15;
   }
@@ -989,6 +1014,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
     ////////////////////////////// custom image order
+    // clang-format off
     TRY_EXEC("ALTER TABLE main.images ADD COLUMN position INTEGER",
              "[init] can't add `position' column to images table in database\n");
     TRY_EXEC("CREATE INDEX main.image_position_index ON images (position)",
@@ -1004,7 +1030,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     //
     TRY_EXEC("UPDATE main.images SET position = id << 32",
              "[init] can't update positions custom image order table\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 16;
   }
@@ -1012,11 +1038,12 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
     ////////////////////////////// final image aspect ratio
+    // clang-format off
     TRY_EXEC("ALTER TABLE main.images ADD COLUMN aspect_ratio REAL",
              "[init] can't add `aspect_ratio' column to images table in database\n");
     TRY_EXEC("UPDATE main.images SET aspect_ratio = 0.0",
              "[init] can't update aspect_ratio in database\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 17;
   }
@@ -1025,6 +1052,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
 
     ////////////////////////////// masks history
+    // clang-format off
     TRY_EXEC("CREATE TABLE main.masks_history (imgid INTEGER, num INTEGER, formid INTEGER, form INTEGER, name VARCHAR(256), "
              "version INTEGER, points BLOB, points_count INTEGER, source BLOB)",
              "[init] can't create `masks_history` table\n");
@@ -1078,7 +1106,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     // create a temp table with the previous priorities
     TRY_EXEC("CREATE TEMPORARY TABLE iop_order_tmp (iop_order REAL, operation VARCHAR(256))",
              "[init] can't create temporary table for updating `main.history'\n");
-
+    // clang-format on
     // fill temp table with all operations up to this release
     // it will be used to create the pipe and update the iop_order on history
     for(GList *priorities = prior_v1; priorities; priorities = g_list_next(priorities))
@@ -1103,6 +1131,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     // so we assume that is always less than 1000 and reverse it
     // it is possible that multi_priority = 0 don't appear in history
     // so just in case 1 / 1000 to every instance
+    // clang-format off
     TRY_EXEC("UPDATE main.history SET iop_order = ((("
         "SELECT MAX(multi_priority) FROM main.history hist1 WHERE hist1.imgid = main.history.imgid AND hist1.operation = main.history.operation "
              ") + 1. - multi_priority) / 1000.) + "
@@ -1114,15 +1143,16 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     sqlite3_stmt *sel_stmt;
     TRY_PREPARE(sel_stmt, "SELECT DISTINCT operation FROM main.history WHERE iop_order <= 0 OR iop_order IS NULL",
                 "[init] can't prepare selecting history iop_order\n");
+    // clang-format on
     while(sqlite3_step(sel_stmt) == SQLITE_ROW)
     {
       const char *op_name = (const char *)sqlite3_column_text(sel_stmt, 0);
-      printf("operation %s with no iop_order while upgrading database\n", op_name);
+      dt_print(DT_DEBUG_ALWAYS, "[init] operation %s with no iop_order while upgrading database\n", op_name);
     }
     sqlite3_finalize(sel_stmt);
-
+    // clang-format off
     TRY_EXEC("DROP TABLE iop_order_tmp", "[init] can't drop table `iop_order_tmp' from database\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 18;
   }
@@ -1135,7 +1165,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   else if(version == 18)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("UPDATE images SET orientation=-2 WHERE orientation=1;",
              "[init] can't update images orientation 1 from database\n");
 
@@ -1153,14 +1183,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
 
     TRY_EXEC("UPDATE images SET orientation=6 WHERE orientation=-6;",
              "[init] can't update images orientation -6 from database\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 19;
   }
   else if(version == 19)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     // create a temp table to invert all multi_priority
     TRY_EXEC("CREATE TEMPORARY TABLE m_prio (id INTEGER, operation VARCHAR(256), prio INTEGER)",
              "[init] can't create temporary table for updating `history and style_items'\n");
@@ -1180,17 +1210,17 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
              "[init] can't update multi_priority for history\n");
 
     TRY_EXEC("DROP TABLE m_prio", "[init] can't drop table `m_prio' from database\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 20;
   }
   else if(version == 20)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("DROP INDEX IF EXISTS main.used_tags_idx", "[init] can't drop index `used_tags_idx' from database\n");
     TRY_EXEC("DROP TABLE used_tags", "[init] can't delete table used_tags\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
 
     new_version = 21;
@@ -1199,6 +1229,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
     // create a temp table to invert all multi_priority
+    // clang-format off
     TRY_EXEC("CREATE TABLE module_order (imgid INTEGER PRIMARY KEY, version INTEGER, iop_list VARCHAR)",
              "[init] can't create module_order table'\n");
 
@@ -1210,16 +1241,16 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
                           " GROUP BY imgid, operation, multi_priority"
                           " ORDER BY imgid, iop_order",
                 "[init] can't prepare selecting history for iop_order migration (v21)\n");
-
+    // clang-format on
     GList *item_list = NULL;
-    int current_imgid = -1;
+    dt_imgid_t current_imgid = NO_IMGID;
     int current_order_version = -1;
 
     gboolean has_row = (sqlite3_step(mig_stmt) == SQLITE_ROW);
 
     while(has_row)
     {
-      const int32_t imgid = sqlite3_column_int(mig_stmt, 0);
+      const dt_imgid_t imgid = sqlite3_column_int(mig_stmt, 0);
       char operation[20] = { 0 };
       g_strlcpy(operation, (const char *)sqlite3_column_text(mig_stmt, 1), sizeof(operation));
       const int multi_priority = sqlite3_column_int(mig_stmt, 2);
@@ -1261,7 +1292,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
               iop_order_list = g_list_delete_link(iop_order_list, s);
             }
 
-            // skip all multipe instances
+            // skip all multiple instances
             n = e;
             do
             {
@@ -1352,7 +1383,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     sqlite3_finalize(mig_stmt);
 
     // remove iop_order from history table
-
+    // clang-format off
     TRY_EXEC("CREATE TABLE h (imgid INTEGER, num INTEGER, module INTEGER, "
              "operation VARCHAR(256), op_params BLOB, enabled INTEGER, "
              "blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))",
@@ -1397,7 +1428,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
              "[init] can't drop table images\n");
     TRY_EXEC("ALTER TABLE i RENAME TO images",
              "[init] can't rename i to images\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
 
     new_version = 22;
@@ -1405,6 +1436,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   else if(version == 22)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+    // clang-format off
     TRY_EXEC("CREATE INDEX IF NOT EXISTS main.images_group_id_index ON images (group_id)",
              "[init] can't create group_id index on image\n");
     TRY_EXEC("CREATE INDEX IF NOT EXISTS  main.images_film_id_index ON images (film_id)",
@@ -1416,6 +1448,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
 
     TRY_EXEC("CREATE INDEX IF NOT EXISTS main.film_rolls_folder_index ON film_rolls (folder)",
              "[init] can't create folder index on film_rolls\n");
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
 
     new_version = 23;
@@ -1423,16 +1456,18 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   else if(version == 23)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+    // clang-format off
     TRY_EXEC("CREATE TABLE main.history_hash (imgid INTEGER PRIMARY KEY, "
              "basic_hash BLOB, auto_hash BLOB, current_hash BLOB)",
              "[init] can't create table history_hash\n");
+    // clang-format on
 
     // use the former dt_image_altered() to initialise the history_hash table
     // insert an history_hash entry for all images which have an history
     // note that images without history don't get hash and are considered as basic
     sqlite3_stmt *h_stmt;
-    const gboolean basecurve_auto_apply = dt_conf_is_equal("plugins/darkroom/workflow", "display-referred");
-    const gboolean sharpen_auto_apply = dt_conf_get_bool("plugins/darkroom/sharpen/auto_apply");
+    const gboolean basecurve_auto_apply = dt_is_display_referred();
+    // clang-format off
     char *query = g_strdup_printf(
                             "SELECT id, CASE WHEN imgid IS NULL THEN 0 ELSE 1 END as altered "
                             // first, images which are both in images and history (avoids history orphans)
@@ -1440,15 +1475,15 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
                             "LEFT JOIN (SELECT DISTINCT imgid FROM main.images JOIN main.history ON imgid = id "
                             "           WHERE num < history_end AND enabled = 1"
                             "             AND operation NOT IN ('flip', 'dither', 'highlights', 'rawprepare', "
-                            "             'colorin', 'colorout', 'gamma', 'demosaic', 'temperature'%s%s)) "
+                            "             'colorin', 'colorout', 'gamma', 'demosaic', 'temperature'%s)) "
                             "ON imgid = id",
-                             basecurve_auto_apply ? ", 'basecurve'" : "",
-                             sharpen_auto_apply ? ", 'sharpen'" : "");
+                             basecurve_auto_apply ? ", 'basecurve'" : "");
+    // clang-format on
     TRY_PREPARE(h_stmt, query,
                 "[init] can't prepare selecting history for history_hash migration\n");
     while(sqlite3_step(h_stmt) == SQLITE_ROW)
     {
-      const int32_t imgid= sqlite3_column_int(h_stmt, 0);
+      const dt_imgid_t imgid= sqlite3_column_int(h_stmt, 0);
       const int32_t altered = sqlite3_column_int(h_stmt, 1);
 
       guint8 *hash = NULL;
@@ -1457,12 +1492,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
 
       // get history
       sqlite3_stmt *h2_stmt;
+      // clang-format off
       sqlite3_prepare_v2(db->handle,
                          "SELECT operation, op_params, blendop_params"
                          " FROM main.history"
                          " WHERE imgid = ?1 AND enabled = 1"
                          " ORDER BY num",
                          -1, &h2_stmt, NULL);
+      // clang-format on
       sqlite3_bind_int(h2_stmt, 1, imgid);
       while(sqlite3_step(h2_stmt) == SQLITE_ROW)
       {
@@ -1482,11 +1519,13 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
 
       // get module order
       h2_stmt = NULL;
+      // clang-format off
       sqlite3_prepare_v2(db->handle,
                          "SELECT version, iop_list"
                          " FROM main.module_order"
                          " WHERE imgid = ?1",
                          -1, &h2_stmt, NULL);
+      // clang-format on
       sqlite3_bind_int(h2_stmt, 1, imgid);
       if(sqlite3_step(h2_stmt) == SQLITE_ROW)
       {
@@ -1509,10 +1548,12 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
       g_checksum_free(checksum);
       // insert the hash for that image
       h2_stmt = NULL;
+      // clang-format off
       sqlite3_prepare_v2(db->handle,
                          "INSERT INTO main.history_hash"
                          " VALUES (?1, ?2, NULL, ?3)",
                          -1, &h2_stmt, NULL);
+      // clang-format on
       sqlite3_bind_int(h2_stmt, 1, imgid);
       sqlite3_bind_blob(h2_stmt, 2, altered ? NULL : hash, altered ? 0 : hash_len, SQLITE_TRANSIENT);
       sqlite3_bind_blob(h2_stmt, 3, hash, hash_len, SQLITE_TRANSIENT);
@@ -1529,22 +1570,26 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
   }
   else if(version == 24)
   {
+    // clang-format off
     TRY_EXEC("ALTER TABLE main.history_hash ADD COLUMN mipmap_hash BLOB",
              "[init] can't add `mipmap_hash' column to history_hash table in database\n");
+    // clang-format on
 
     new_version = 25;
   }
   else if(version == 25)
   {
+    // clang-format of
     TRY_EXEC("ALTER TABLE main.images ADD COLUMN exposure_bias REAL",
              "[init] can't add `exposure_bias' column to images table in database\n");
+    // clang-format on
 
     new_version = 26;
   }
   else if(version == 26)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("CREATE TABLE main.new_film_rolls "
              "(id INTEGER PRIMARY KEY, "
              "access_timestamp INTEGER, "
@@ -1568,14 +1613,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
 
     TRY_EXEC("CREATE INDEX main.film_rolls_folder_index ON film_rolls (folder)",
              "[init] can't create index `film_rolls_folder_index' on table `film_rolls'\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 27;
   }
   else if(version == 27)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     TRY_EXEC("ALTER TABLE main.images ADD COLUMN import_timestamp INTEGER DEFAULT -1",
              "[init] can't add `import_timestamp' column to images table in database\n");
     TRY_EXEC("ALTER TABLE main.images ADD COLUMN change_timestamp INTEGER DEFAULT -1",
@@ -1595,14 +1640,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
                    "JOIN data.tags ON tags.id = tagged_images.tagid "
                      "WHERE data.tags.name = 'darktable|changed')",
              "[init] can't populate change_timestamp column from images.write_timestamp.\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 28;
   }
   else if(version == 28)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     // clear flag DT_IMAGE_REJECTED (was not used)
     TRY_EXEC("UPDATE main.images SET flags = (flags & ~8)",
              "[init] can't clear rejected flags");
@@ -1610,14 +1655,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     // add DT_IMAGE_REJECTED and clear rating for all images being rejected
     TRY_EXEC("UPDATE main.images SET flags = (flags | 8) & ~7 WHERE (flags & 7) = 6",
              "[init] can't set rejected flags");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 29;
   }
   else if(version == 29)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     // add position in tagged_images table
     TRY_EXEC("ALTER TABLE main.tagged_images ADD COLUMN position INTEGER",
              "[init] can't add `position' column to tagged_images table in database\n");
@@ -1669,14 +1714,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
           "[init] can't create filename index on images table\n");
     TRY_EXEC("CREATE INDEX main.image_position_index ON images (position)",
           "[init] can't create position index on images table\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 30;
   }
   else if(version == 30)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     // add second columns to speed up sorting
     TRY_EXEC("DROP INDEX IF EXISTS `history_imgid_index`",
         "[init] can't drop history_imgid_index\n");
@@ -1706,14 +1751,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     // map refinement: avoid full table scan
     TRY_EXEC("CREATE INDEX `images_latlong_index` ON `images` ( `latitude` DESC, `longitude` DESC )",
         "[init] can't create images_latlong_index\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 31;
   }
   else if(version == 31)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     // remove duplicates
     TRY_EXEC("DELETE FROM main.meta_data WHERE rowid NOT IN (SELECT MIN(rowid) "
              "FROM main.meta_data GROUP BY id, key)",
@@ -1724,13 +1769,14 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
              "[init] can't drop metadata_index\n");
     TRY_EXEC("CREATE UNIQUE INDEX main.metadata_index ON meta_data (id, key)",
              "[init] can't create metadata_index\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 32;
   }
   else if(version == 32)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+    // clang-format off
     // add foreign keys for database consistency. ON UPDATE CASCADE since you never know
     // if a future version will change image_id
     // Unfortunately sqlite does not support adding foreign keys to existing tables
@@ -1958,7 +2004,7 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
 
     TRY_EXEC("DROP TABLE module_order_old",
         "[init] can't drop table module_order_old\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 33;
   }
@@ -1974,11 +2020,906 @@ static int _upgrade_library_schema_step(dt_database_t *db, int version)
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
     new_version = 34;
   }
+  else if(version == 34)
+  {
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = OFF", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    TRY_EXEC("CREATE TABLE main.images_new (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, film_id INTEGER, "
+        "width INTEGER, height INTEGER, filename VARCHAR, maker VARCHAR, model VARCHAR, "
+        "lens VARCHAR, exposure REAL, aperture REAL, iso REAL, focal_length REAL, "
+        "focus_distance REAL, datetime_taken INTEGER, flags INTEGER, "
+        "output_width INTEGER, output_height INTEGER, crop REAL, "
+        "raw_parameters INTEGER, raw_denoise_threshold REAL, "
+        "raw_auto_bright_threshold REAL, raw_black INTEGER, raw_maximum INTEGER, "
+        "license VARCHAR, sha1sum CHAR(40), "
+        "orientation INTEGER, histogram BLOB, lightmap BLOB, longitude REAL, "
+        "latitude REAL, altitude REAL, color_matrix BLOB, colorspace INTEGER, version INTEGER, "
+        "max_version INTEGER, write_timestamp INTEGER, history_end INTEGER, position INTEGER, "
+        "aspect_ratio REAL, exposure_bias REAL, "
+        "import_timestamp INTEGER, change_timestamp INTEGER, "
+        "export_timestamp INTEGER, print_timestamp INTEGER, "
+        "FOREIGN KEY(film_id) REFERENCES film_rolls(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+        "FOREIGN KEY(group_id) REFERENCES images(id) ON DELETE RESTRICT ON UPDATE CASCADE)",
+        "[init] can't create new images table\n");
+
+    TRY_EXEC("INSERT INTO `images_new` SELECT "
+        "id, group_id, film_id, width, height, filename, maker, model, "
+        "lens, exposure, aperture, iso, focal_length, focus_distance, NULL AS datetime_taken, flags, "
+        "output_width, output_height, crop, raw_parameters, raw_denoise_threshold, raw_auto_bright_threshold, raw_black, raw_maximum, "
+        "license, sha1sum, orientation, histogram, lightmap, longitude, latitude, altitude, color_matrix, colorspace, version, "
+        "max_version, write_timestamp, history_end, position, aspect_ratio, exposure_bias, "
+        "NULL AS import_timestamp, NULL AS change_timestamp, NULL AS export_timestamp, NULL AS print_timestamp "
+        "FROM `images`",
+        "[init] can't copy back from images\n");
+
+    TRY_PREPARE(stmt, "SELECT id,"
+                      " CASE WHEN datetime_taken = '' THEN NULL ELSE datetime_taken END,"
+                      " CASE WHEN import_timestamp = -1 THEN NULL ELSE import_timestamp END,"
+                      " CASE WHEN change_timestamp = -1 THEN NULL ELSE change_timestamp END,"
+                      " CASE WHEN export_timestamp = -1 THEN NULL ELSE export_timestamp END,"
+                      " CASE WHEN print_timestamp = -1 THEN NULL ELSE print_timestamp END "
+                      "FROM `images`",
+                "[init] can't get datetime from images\n");
+    while(sqlite3_step(stmt) == SQLITE_ROW)
+    {
+      sqlite3_stmt *stmt2;
+      sqlite3_prepare_v2(db->handle,
+                         "UPDATE `images_new` SET"
+                         " (datetime_taken, import_timestamp,"
+                         "  change_timestamp, export_timestamp, print_timestamp) = "
+                         " (?2, ?3, ?4, ?5, ?6) WHERE id = ?1",
+                         -1, &stmt2, NULL);
+      sqlite3_bind_int(stmt2, 1, sqlite3_column_int(stmt, 0));
+      if(sqlite3_column_type(stmt, 1) != SQLITE_NULL)
+      {
+        GDateTime *gdt = dt_datetime_exif_to_gdatetime((const char *)sqlite3_column_text(stmt, 1), darktable.utc_tz);
+        if(gdt)
+        {
+          sqlite3_bind_int64(stmt2, 2, dt_datetime_gdatetime_to_gtimespan(gdt));
+          g_date_time_unref(gdt);
+        }
+      }
+      for(int i = 0; i < 4; i++)
+      {
+        if(sqlite3_column_type(stmt, i + 2) != SQLITE_NULL)
+        {
+          GDateTime *gdt = g_date_time_new_from_unix_utc(sqlite3_column_int(stmt, i + 2));
+          if(gdt)
+          {
+            sqlite3_bind_int64(stmt2, i + 3, dt_datetime_gdatetime_to_gtimespan(gdt));
+            g_date_time_unref(gdt);
+          }
+        }
+      }
+      TRY_STEP(stmt2, SQLITE_DONE, "[init] can't update datetimes into images_new table\n");
+      sqlite3_finalize(stmt2);
+    }
+    sqlite3_finalize(stmt);
+
+    TRY_EXEC("DROP TABLE `images`", "[init] can't drop images table\n");
+    // that's the way to keep the other tables foreign keys references valid
+    TRY_EXEC("ALTER TABLE `images_new` RENAME TO `images`", "[init] can't rename images_new table to images");
+
+    // pita: need to recreate indexes
+    TRY_EXEC("CREATE INDEX `image_position_index` ON `images` (position)",
+        "[init] can't add image_position_index\n");
+    TRY_EXEC("CREATE INDEX `images_filename_index` ON `images` ( `filename`, `version` )",
+        "[init] can't recreate images_filename_index\n");
+    TRY_EXEC("CREATE INDEX `images_film_id_index` ON `images` ( `film_id`, `filename` )",
+        "[init] can't recreate images_film_id_index\n");
+    TRY_EXEC("CREATE INDEX `images_group_id_index` ON `images` ( `group_id`, `id` )",
+        "[init] can't recreate images_group_id_index\n");
+    TRY_EXEC("CREATE INDEX `images_latlong_index` ON `images` ( latitude DESC, longitude DESC )",
+        "[init] can't add images_latlong_index\n");
+    TRY_EXEC("CREATE INDEX `images_datetime_taken` ON images (datetime_taken)",
+        "[init] can't create images_datetime_taken\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
+    new_version = 35;
+  }
+  else if(version == 35)
+  {
+    TRY_EXEC("CREATE TABLE main.images_new (id INTEGER, filename VARCHAR, flags INTEGER)",
+             "[init] can't create new images table\n");
+
+    gchar *query = g_strdup_printf("INSERT INTO `images_new` "
+                                   "SELECT id, filename, flags"
+                                   " FROM images"
+                                   " WHERE (flags & %d == 0)",
+                                   DT_IMAGE_RAW | DT_IMAGE_LDR | DT_IMAGE_HDR);
+    TRY_EXEC(query, "[init] can't copy back from images\n");
+
+    TRY_PREPARE(stmt, "SELECT id, filename, flags FROM `images_new`",
+                "[init] can't prepare selecting images flags\n");
+
+    while(sqlite3_step(stmt) == SQLITE_ROW)
+    {
+      sqlite3_stmt *stmt2;
+      sqlite3_prepare_v2(db->handle,
+                         "UPDATE `images` SET"
+                         " (flags) = "
+                         " (?2) WHERE id = ?1",
+                         -1, &stmt2, NULL);
+      sqlite3_bind_int(stmt2, 1, sqlite3_column_int(stmt, 0));
+
+      dt_image_flags_t flags = sqlite3_column_int(stmt, 2);
+      gchar *ext = g_strrstr((const char *)sqlite3_column_text(stmt, 1), ".");
+      flags |= dt_imageio_get_type_from_extension(ext);
+      sqlite3_bind_int(stmt2, 2, flags);
+
+      TRY_STEP(stmt2, SQLITE_DONE, "[init] can't update flags\n");
+      sqlite3_finalize(stmt2);
+    }
+    sqlite3_finalize(stmt);
+
+    TRY_EXEC("DROP TABLE `images_new`", "[init] can't drop temp images table\n");
+    new_version = 36;
+  }
+  else if(version == 36)
+  {
+    TRY_EXEC("CREATE INDEX IF NOT EXISTS `metadata_index_value` ON meta_data (value)",
+             "[init] can't create metadata_index_value\n");
+    new_version = 37;
+  }
+  else if(version == 37)
+  {
+    TRY_EXEC("ALTER TABLE main.history ADD COLUMN multi_name_hand_edited INTEGER default 0",
+             "[init] can't add multi_name_hand_edited column\n");
+    TRY_EXEC("UPDATE main.history SET multi_name_hand_edited = 1 WHERE multi_name != ''",
+             "[init] can't set multi_name_hand_edited column\n");
+    new_version = 38;
+  }
+  else if(version == 38)
+  {
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = OFF", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    // create new tables
+    TRY_EXEC("CREATE TABLE main.makers"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  name VARCHAR)",
+             "[init] can't create makers table\n");
+    TRY_EXEC("CREATE TABLE main.models"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  name VARCHAR)",
+             "[init] can't create models table\n");
+    TRY_EXEC("CREATE TABLE main.lens"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  name VARCHAR)",
+             "[init] can't create lens table\n");
+    TRY_EXEC("CREATE TABLE cameras"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  name VARCHAR,"
+             "  alias VARCHAR)",
+             "[init] can't create cameras table\n");
+
+    // create new indexes
+    TRY_EXEC("CREATE INDEX makers_name ON makers (name)",
+             "[init] can't create makers_name\n");
+    TRY_EXEC("CREATE INDEX model_name ON models (name)",
+             "[init] can't create model_name\n");
+    TRY_EXEC("CREATE INDEX lens_name ON lens (name)",
+             "[init] can't create lens_name\n");
+    TRY_EXEC("CREATE INDEX camera_name ON cameras (name)",
+             "[init] can't create camera_name\n");
+
+    // populate new tables
+    TRY_EXEC("INSERT INTO main.makers (name)"
+             " SELECT DISTINCT maker FROM main.images",
+             "[init] can't populate makers table\n");
+    TRY_EXEC("INSERT INTO main.models (name)"
+             " SELECT DISTINCT model FROM main.images",
+             "[init] can't populate models table\n");
+    TRY_EXEC("INSERT INTO main.lens (name)"
+             " SELECT DISTINCT lens FROM main.images",
+             "[init] can't populate lens table\n");
+
+    // add new columns for main.images
+    TRY_EXEC("ALTER TABLE main.images ADD COLUMN maker_id INTEGER default 0",
+             "[init] can't add maker_id column\n");
+    TRY_EXEC("ALTER TABLE main.images ADD COLUMN model_id INTEGER default 0",
+             "[init] can't add model_id column\n");
+    TRY_EXEC("ALTER TABLE main.images ADD COLUMN lens_id INTEGER default 0",
+             "[init] can't add lens_id column\n");
+    TRY_EXEC("ALTER TABLE main.images ADD COLUMN camera_id INTEGER default 0",
+             "[init] can't add camera_id column\n");
+
+    // update main images columns
+    TRY_EXEC("UPDATE main.images"
+             " SET maker_id = (SELECT id FROM main.makers WHERE name = maker)",
+             "[init] can't populate maker_id column\n");
+    TRY_EXEC("UPDATE main.images"
+             " SET model_id = (SELECT id FROM main.models WHERE name = model)",
+             "[init] can't populate model_id column\n");
+    TRY_EXEC("UPDATE main.images"
+             " SET lens_id = (SELECT id FROM main.lens WHERE name = lens)",
+             "[init] can't populate lens_id column\n");
+
+#if 0
+    // drop old columns (only supported starting with 3.35)
+    TRY_EXEC("ALTER TABLE main.images DROP COLUMN maker",
+             "[init] can't drop maker column\n");
+    TRY_EXEC("ALTER TABLE main.images DROP COLUMN model",
+             "[init] can't drop model column\n");
+    TRY_EXEC("ALTER TABLE main.images DROP COLUMN lens",
+             "[init] can't drop lens column\n");
+#endif
+
+    TRY_EXEC("CREATE TABLE images_new (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, "
+             "film_id INTEGER, "
+             "width INTEGER, height INTEGER, filename VARCHAR, "
+             "maker_id INTEGER, model_id INTEGER, lens_id INTEGER, camera_id INTEGER,"
+             "exposure REAL, aperture REAL, iso REAL, focal_length REAL, "
+             "focus_distance REAL, datetime_taken INTEGER, flags INTEGER, "
+             "output_width INTEGER, output_height INTEGER, crop REAL, "
+             "raw_parameters INTEGER, raw_denoise_threshold REAL, "
+             "raw_auto_bright_threshold REAL, raw_black INTEGER, raw_maximum INTEGER, "
+             "license VARCHAR, sha1sum CHAR(40), "
+             "orientation INTEGER, histogram BLOB, lightmap BLOB, longitude REAL, "
+             "latitude REAL, altitude REAL, color_matrix BLOB, colorspace INTEGER, version INTEGER, "
+             "max_version INTEGER, write_timestamp INTEGER, history_end INTEGER, position INTEGER, "
+             "aspect_ratio REAL, exposure_bias REAL, "
+             "import_timestamp INTEGER DEFAULT -1, change_timestamp INTEGER DEFAULT -1, "
+             "export_timestamp INTEGER DEFAULT -1, print_timestamp INTEGER DEFAULT -1, "
+             "FOREIGN KEY(maker_id) REFERENCES makers(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(model_id) REFERENCES models(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(lens_id) REFERENCES lens(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(film_id) REFERENCES film_rolls(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(group_id) REFERENCES images(id) ON DELETE RESTRICT ON UPDATE CASCADE)",
+             "[init] can't create new table images");
+
+    TRY_EXEC("INSERT INTO images_new"
+             " SELECT id, group_id, film_id, width, height, filename,"
+             "        maker_id, model_id, lens_id, camera_id,"
+             "        exposure, aperture, iso, focal_length,"
+             "        focus_distance, datetime_taken, flags,"
+             "        output_width, output_height, crop,"
+             "        raw_parameters, raw_denoise_threshold,"
+             "        raw_auto_bright_threshold, raw_black, raw_maximum,"
+             "        license, sha1sum,"
+             "        orientation, histogram, lightmap, longitude,"
+             "        latitude, altitude, color_matrix, colorspace, version,"
+             "        max_version, write_timestamp, history_end, position,"
+             "        aspect_ratio, exposure_bias,"
+             "        import_timestamp, change_timestamp, export_timestamp, print_timestamp"
+             "  FROM images",
+             "[init] can't populate new images table\n");
+
+    TRY_EXEC("DROP TABLE images",
+             "[init] can't drop table images_old\n");
+
+    TRY_EXEC("ALTER TABLE images_new RENAME TO images",
+             "[init] can't rename images\n");
+
+    // recreate the indexes
+    TRY_EXEC("CREATE INDEX image_position_index ON images (position)",
+             "[init] can't add image_position_index\n");
+    TRY_EXEC("CREATE INDEX images_filename_index ON images (filename, version)",
+             "[init] can't recreate images_filename_index\n");
+    TRY_EXEC("CREATE INDEX images_film_id_index ON images (film_id, filename)",
+             "[init] can't recreate images_film_id_index\n");
+    TRY_EXEC("CREATE INDEX images_group_id_index ON images (group_id, id)",
+             "[init] can't recreate images_group_id_index\n");
+    TRY_EXEC("CREATE INDEX images_latlong_index ON images (latitude DESC, longitude DESC)",
+             "[init] can't add images_latlong_index\n");
+    TRY_EXEC("CREATE INDEX images_datetime_taken ON images (datetime_taken)",
+             "[init] can't create images_datetime_taken\n");
+
+    // Some triggers to remove possible dangling refs in makers/models/lens/cameras
+    TRY_EXEC("CREATE TRIGGER remove_makers AFTER DELETE ON images"
+             " BEGIN"
+             "  DELETE FROM makers"
+             "    WHERE id = OLD.maker_id"
+             "      AND NOT EXISTS (SELECT 1 FROM images WHERE maker_id = OLD.maker_id);"
+             " END",
+             "[init] can't create trigger remove_makers\n");
+
+    TRY_EXEC("CREATE TRIGGER remove_models AFTER DELETE ON images"
+             " BEGIN"
+             "  DELETE FROM models"
+             "    WHERE id = OLD.model_id"
+             "      AND NOT EXISTS (SELECT 1 FROM images WHERE model_id = OLD.model_id);"
+             " END",
+             "[init] can't create trigger remove_models\n");
+
+    TRY_EXEC("CREATE TRIGGER remove_lens AFTER DELETE ON images"
+             " BEGIN"
+             "  DELETE FROM lens"
+             "    WHERE id = OLD.lens_id"
+             "      AND NOT EXISTS (SELECT 1 FROM images WHERE lens_id = OLD.lens_id);"
+             " END",
+             "[init] can't create trigger remove_lens\n");
+
+    TRY_EXEC("CREATE TRIGGER remove_cameras AFTER DELETE ON images"
+             " BEGIN"
+             "  DELETE FROM cameras"
+             "    WHERE id = OLD.camera_id"
+             "      AND NOT EXISTS (SELECT 1 FROM images WHERE camera_id = OLD.camera_id);"
+             " END",
+             "[init] can't create trigger remove_cameras\n");
+
+    // NOTE: datetime_taken is in nano-second since "0001-01-01 00:00:00"
+    TRY_EXEC
+      ("CREATE VIEW v_images AS"
+       " SELECT mi.id AS id, mk.name AS maker, md.name AS model, ln.name AS lens,"
+       "        cm.name AS normalized_camera, cm.alias AS camera_alias,"
+       "        exposure, aperture, iso,"
+       "        datetime(datetime_taken/1000000"
+       "                 + unixepoch('0001-01-01 00:00:00'), 'unixepoch') AS datetime,"
+       "        fr.folder AS folders, filename"
+       " FROM images AS mi,"
+       "      makers AS mk, models AS md, lens AS ln, cameras AS cm, film_rolls AS fr"
+       " WHERE mi.maker_id = mk.id"
+       "   AND mi.model_id = md.id"
+       "   AND mi.lens_id = ln.id"
+       "   AND mi.camera_id = cm.id"
+       "   AND mi.film_id = fr.id"
+       " ORDER BY normalized_camera, folders",
+       "[init] can't create view v_images\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
+
+    new_version = 39;
+  }
+  else if(version == 39)
+  {
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = OFF", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    TRY_EXEC("DROP TABLE cameras",
+             "[init] can't drop cameras table\n");
+
+    TRY_EXEC("CREATE TABLE cameras"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  maker VARCHAR, model VARCHAR,"
+             "  alias VARCHAR)",
+             "[init] can't create cameras table\n");
+
+    TRY_EXEC("CREATE UNIQUE INDEX camera_name ON cameras (maker, model, alias)",
+             "[init] can't create camera_name\n");
+
+    // NOTE: datetime_taken is in nano-second since "0001-01-01 00:00:00"
+    TRY_EXEC("DROP VIEW v_images",
+             "[init] can't drop v_images view\n");
+
+    TRY_EXEC
+      ("CREATE VIEW v_images AS"
+       " SELECT mi.id AS id, mk.name AS maker, md.name AS model, ln.name AS lens,"
+       "        cm.maker || ' ' || cm.model AS normalized_camera, "
+       "        cm.alias AS camera_alias,"
+       "        exposure, aperture, iso,"
+       "        datetime(datetime_taken/1000000"
+       "                 + unixepoch('0001-01-01 00:00:00'), 'unixepoch') AS datetime,"
+       "        fr.folder AS folders, filename"
+       " FROM images AS mi,"
+       "      makers AS mk, models AS md, lens AS ln, cameras AS cm, film_rolls AS fr"
+       " WHERE mi.maker_id = mk.id"
+       "   AND mi.model_id = md.id"
+       "   AND mi.lens_id = ln.id"
+       "   AND mi.camera_id = cm.id"
+       "   AND mi.film_id = fr.id"
+       " ORDER BY normalized_camera, folders",
+       "[init] can't create view v_images\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
+
+    new_version = 40;
+  }
+  else if(version == 40)
+  {
+    TRY_EXEC("ALTER TABLE main.history_hash ADD COLUMN fullthumb_hash BLOB default NULL",
+             "[init] can't add fullthumb_hash column\n");
+    new_version = 41;
+  }
+  else if(version == 41)
+  {
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = OFF", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    TRY_EXEC("CREATE TABLE images_new (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, "
+             "film_id INTEGER, "
+             "width INTEGER, height INTEGER, filename VARCHAR, "
+             "maker_id INTEGER, model_id INTEGER, lens_id INTEGER, camera_id INTEGER,"
+             "exposure REAL, aperture REAL, iso REAL, focal_length REAL, "
+             "focus_distance REAL, datetime_taken INTEGER, flags INTEGER, "
+             "output_width INTEGER, output_height INTEGER, crop REAL, "
+             "raw_parameters INTEGER, raw_black INTEGER, raw_maximum INTEGER, "
+             "orientation INTEGER, longitude REAL, "
+             "latitude REAL, altitude REAL, color_matrix BLOB, colorspace INTEGER, version INTEGER, "
+             "max_version INTEGER, write_timestamp INTEGER, history_end INTEGER, position INTEGER, "
+             "aspect_ratio REAL, exposure_bias REAL, "
+             "import_timestamp INTEGER DEFAULT -1, change_timestamp INTEGER DEFAULT -1, "
+             "export_timestamp INTEGER DEFAULT -1, print_timestamp INTEGER DEFAULT -1, "
+             "FOREIGN KEY(maker_id) REFERENCES makers(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(model_id) REFERENCES models(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(lens_id) REFERENCES lens(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(film_id) REFERENCES film_rolls(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(group_id) REFERENCES images(id) ON DELETE RESTRICT ON UPDATE CASCADE)",
+             "[init] can't create new table images");
+
+    TRY_EXEC("INSERT INTO images_new"
+             " SELECT id, group_id, film_id, width, height, filename,"
+             "        maker_id, model_id, lens_id, camera_id,"
+             "        exposure, aperture, iso, focal_length,"
+             "        focus_distance, datetime_taken, flags,"
+             "        output_width, output_height, crop,"
+             "        raw_parameters, raw_black, raw_maximum,"
+             "        orientation, longitude,"
+             "        latitude, altitude, color_matrix, colorspace, version,"
+             "        max_version, write_timestamp, history_end, position,"
+             "        aspect_ratio, exposure_bias,"
+             "        import_timestamp, change_timestamp, export_timestamp, print_timestamp"
+             "  FROM images",
+             "[init] can't populate new images table\n");
+
+    // NOTE: datetime_taken is in nano-second since "0001-01-01 00:00:00"
+    TRY_EXEC("DROP VIEW v_images",
+             "[init] can't drop v_images view\n");
+
+    TRY_EXEC("DROP TABLE images",
+             "[init] can't drop table images_old\n");
+
+    TRY_EXEC("ALTER TABLE images_new RENAME TO images",
+             "[init] can't rename images\n");
+
+    TRY_EXEC
+      ("CREATE VIEW v_images AS"
+       " SELECT mi.id AS id, mk.name AS maker, md.name AS model, ln.name AS lens,"
+       "        cm.maker || ' ' || cm.model AS normalized_camera, "
+       "        cm.alias AS camera_alias,"
+       "        exposure, aperture, iso,"
+       "        datetime(datetime_taken/1000000"
+       "                 + unixepoch('0001-01-01 00:00:00'), 'unixepoch') AS datetime,"
+       "        fr.folder AS folders, filename"
+       " FROM images AS mi,"
+       "      makers AS mk, models AS md, lens AS ln, cameras AS cm, film_rolls AS fr"
+       " WHERE mi.maker_id = mk.id"
+       "   AND mi.model_id = md.id"
+       "   AND mi.lens_id = ln.id"
+       "   AND mi.camera_id = cm.id"
+       "   AND mi.film_id = fr.id"
+       " ORDER BY normalized_camera, folders",
+       "[init] can't create view v_images\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
+
+    new_version = 42;
+  }
+  else if(version == 42)
+  {
+    TRY_EXEC("ALTER TABLE main.history_hash ADD COLUMN fullthumb_maxmip INTEGER default 0",
+             "[init] can't add fullthumb_maxmip column\n");
+    new_version = 43;
+  }
+  else if(version == 43)
+  {
+    // add back triggers and indices removed during last images changes.
+
+    // recreate the indexes
+    TRY_EXEC("CREATE INDEX image_position_index ON images (position)",
+             "[init] can't add image_position_index\n");
+    TRY_EXEC("CREATE INDEX images_filename_index ON images (filename, version)",
+             "[init] can't recreate images_filename_index\n");
+    TRY_EXEC("CREATE INDEX images_film_id_index ON images (film_id, filename)",
+             "[init] can't recreate images_film_id_index\n");
+    TRY_EXEC("CREATE INDEX images_group_id_index ON images (group_id, id)",
+             "[init] can't recreate images_group_id_index\n");
+    TRY_EXEC("CREATE INDEX images_latlong_index ON images (latitude DESC, longitude DESC)",
+             "[init] can't add images_latlong_index\n");
+    TRY_EXEC("CREATE INDEX images_datetime_taken ON images (datetime_taken)",
+             "[init] can't create images_datetime_taken\n");
+
+    // Some triggers to remove possible dangling refs in makers/models/lens/cameras
+    TRY_EXEC("CREATE TRIGGER remove_makers AFTER DELETE ON images"
+             " BEGIN"
+             "  DELETE FROM makers"
+             "    WHERE id = OLD.maker_id"
+             "      AND NOT EXISTS (SELECT 1 FROM images WHERE maker_id = OLD.maker_id);"
+             " END",
+             "[init] can't create trigger remove_makers\n");
+
+    TRY_EXEC("CREATE TRIGGER remove_models AFTER DELETE ON images"
+             " BEGIN"
+             "  DELETE FROM models"
+             "    WHERE id = OLD.model_id"
+             "      AND NOT EXISTS (SELECT 1 FROM images WHERE model_id = OLD.model_id);"
+             " END",
+             "[init] can't create trigger remove_models\n");
+
+    TRY_EXEC("CREATE TRIGGER remove_lens AFTER DELETE ON images"
+             " BEGIN"
+             "  DELETE FROM lens"
+             "    WHERE id = OLD.lens_id"
+             "      AND NOT EXISTS (SELECT 1 FROM images WHERE lens_id = OLD.lens_id);"
+             " END",
+             "[init] can't create trigger remove_lens\n");
+
+    TRY_EXEC("CREATE TRIGGER remove_cameras AFTER DELETE ON images"
+             " BEGIN"
+             "  DELETE FROM cameras"
+             "    WHERE id = OLD.camera_id"
+             "      AND NOT EXISTS (SELECT 1 FROM images WHERE camera_id = OLD.camera_id);"
+             " END",
+             "[init] can't create trigger remove_cameras\n");
+
+    new_version = 44;
+  }
+  else if(version == 44)
+  {
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = OFF", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    // As we cannot rename a table if we have FOREIGN KEY or CASCADE
+    // we do a workaround by creating a tmp table and populate data twice.
+
+    TRY_EXEC("CREATE TABLE tmp_history_hash"
+                " (imgid INTEGER PRIMARY KEY,"
+                "  basic_hash BLOB, auto_hash BLOB, current_hash BLOB, mipmap_hash BLOB,"
+                "  FOREIGN KEY(imgid) REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE)",
+              "[init] can't create table tmp_history_hash\n");
+
+    TRY_EXEC("INSERT INTO tmp_history_hash"
+                " SELECT imgid, basic_hash, auto_hash, current_hash, mipmap_hash"
+                " FROM history_hash",
+              "[init] can't populate table tmp_history_hash\n");
+
+    TRY_EXEC("DROP TABLE history_hash",
+              "[init] can't drop table history_hash\n");
+
+    TRY_EXEC("CREATE TABLE history_hash"
+                " (imgid INTEGER PRIMARY KEY,"
+                "  basic_hash BLOB, auto_hash BLOB, current_hash BLOB, mipmap_hash BLOB,"
+                "  FOREIGN KEY(imgid) REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE)",
+              "[init] can't create new table history_hash\n");
+
+    TRY_EXEC("INSERT INTO history_hash"
+                " SELECT imgid, basic_hash, auto_hash, current_hash, mipmap_hash"
+                " FROM tmp_history_hash",
+              "[init] can't populate table history_hash\n");
+
+    TRY_EXEC("DROP TABLE tmp_history_hash",
+              "[init] can't drop table tmp_history_hash\n");
+
+    TRY_EXEC("ALTER TABLE images ADD COLUMN thumb_timestamp INTEGER default -1",
+             "[init] can't add fullthumb_hash column\n");
+
+    TRY_EXEC("ALTER TABLE images ADD COLUMN thumb_maxmip INTEGER default 0",
+             "[init] can't add fullthumb_maxmip column\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
+
+    new_version = 45;
+  }
+  else if(version == 45)
+  {
+    TRY_EXEC("DROP TABLE IF EXISTS legacy_presets",
+              "[init] can't drop legacy_presets\n");
+
+    new_version = 46;
+  }
+  else if(version == 46)
+  {
+    TRY_EXEC("CREATE TABLE harmony_guide"
+             " (imgid INTEGER PRIMARY KEY,"
+             "  type INTEGER, rotation INTEGER, width INTEGER,"
+             "  FOREIGN KEY(imgid) REFERENCES images(id)"
+             "    ON UPDATE CASCADE ON DELETE CASCADE)",
+             "[init] can't create table harmony_guide\n");
+
+    new_version = 47;
+  }
+  else if(version == 47)
+  {
+    TRY_EXEC("CREATE TABLE overlay"
+             " (imgid INTEGER, overlay_id INTEGER,"
+             "  PRIMARY KEY (imgid, overlay_id),"
+             "  FOREIGN KEY(imgid) REFERENCES images(id)"
+             "    ON UPDATE CASCADE ON DELETE CASCADE)",
+             "[init] can't create table overlay\n");
+
+    new_version = 48;
+  }
+  else if(version == 48)
+  {
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    TRY_EXEC("CREATE TABLE tmp_selected_images (imgid INTEGER PRIMARY KEY)",
+             "[init] can't create table tmp_selected_images\n");
+
+    TRY_EXEC("INSERT INTO tmp_selected_images"
+             " SELECT imgid FROM selected_images",
+              "[init] can't populate table tmp_selected_images\n");
+
+    TRY_EXEC("DROP TABLE selected_images",
+              "[init] can't drop selected_images\n");
+
+    TRY_EXEC("CREATE TABLE selected_images (num INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "                              imgid INTEGER,"
+             "  FOREIGN KEY(imgid) REFERENCES images(id)"
+             "    ON UPDATE CASCADE ON DELETE CASCADE)",
+             "[init] can't create table selected_images\n");
+
+    TRY_EXEC("CREATE UNIQUE INDEX selected_images_ni"
+             " ON selected_images (num, imgid)",
+             "[init] can't create index selected_images_ni\n");
+
+    TRY_EXEC("INSERT INTO selected_images (imgid)"
+             " SELECT imgid FROM tmp_selected_images",
+              "[init] can't populate table selected_images\n");
+
+    TRY_EXEC("DROP TABLE tmp_selected_images",
+              "[init] can't drop tmp_selected_images\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    new_version = 49;
+  }
+  else if(version == 49)
+  {
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    TRY_EXEC("DROP INDEX selected_images_ni",
+             "[init] can't drop index selected_images_ni\n");
+
+    TRY_EXEC("CREATE UNIQUE INDEX selected_images_ni"
+             " ON selected_images (imgid)",
+             "[init] can't create index selected_images_ni\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    new_version = 50;
+  }
+  else if(version == 50)
+  {
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = OFF", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    TRY_EXEC("CREATE TABLE whitebalance"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  name VARCHAR)",
+              "[init] can't create table whitebalance\n");
+    TRY_EXEC("CREATE UNIQUE INDEX whitebalance_name ON whitebalance (name)",
+             "[init] can't create index `whitebalance_name' on table `whitebalance'\n");
+
+    TRY_EXEC("CREATE TABLE flash"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  name VARCHAR)",
+              "[init] can't create table flash\n");
+    TRY_EXEC("CREATE UNIQUE INDEX flash_name ON flash (name)",
+             "[init] can't create index `flash_name' on table `flash'\n");
+
+    TRY_EXEC("CREATE TABLE exposure_program"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  name VARCHAR)",
+              "[init] can't create table exposure_program\n");
+    TRY_EXEC("CREATE UNIQUE INDEX exposure_program_name ON exposure_program (name)",
+             "[init] can't create index `exposure_program_name' on table `exposure_program'\n");
+
+    TRY_EXEC("CREATE TABLE metering_mode"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  name VARCHAR)",
+              "[init] can't create table metering_mode\n");
+    TRY_EXEC("CREATE UNIQUE INDEX metering_mode_name ON metering_mode (name)",
+             "[init] can't create index `metering_mode_name' on table `metering_mode'\n");
+
+    TRY_EXEC("CREATE TABLE images_new"
+             " (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, film_id INTEGER,"
+             "  width INTEGER, height INTEGER, filename VARCHAR,"
+             "  maker_id INTEGER, model_id INTEGER, lens_id INTEGER, camera_id INTEGER,"
+             "  exposure REAL, aperture REAL, iso REAL, focal_length REAL,"
+             "  focus_distance REAL, datetime_taken INTEGER, flags INTEGER,"
+             "  output_width INTEGER, output_height INTEGER, crop REAL,"
+             "  raw_parameters INTEGER, raw_black INTEGER, raw_maximum INTEGER,"
+             "  orientation INTEGER, longitude REAL,"
+             "  latitude REAL, altitude REAL, color_matrix BLOB, colorspace INTEGER,"
+             "  version INTEGER, max_version INTEGER, write_timestamp INTEGER,"
+             "  history_end INTEGER, position INTEGER, aspect_ratio REAL, exposure_bias REAL,"
+             "  import_timestamp INTEGER DEFAULT -1, change_timestamp INTEGER DEFAULT -1, "
+             "  export_timestamp INTEGER DEFAULT -1, print_timestamp INTEGER DEFAULT -1, "
+             "  thumb_timestamp INTEGER DEFAULT -1, thumb_maxmip INTEGER DEFAULT 0, "
+             "  whitebalance_id INTEGER, flash_id INTEGER, "
+             "  exposure_program_id INTEGER, metering_mode_id INTEGER, "
+             "FOREIGN KEY(maker_id) REFERENCES makers(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(model_id) REFERENCES models(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(lens_id) REFERENCES lens(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(film_id) REFERENCES film_rolls(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(group_id) REFERENCES images(id) ON DELETE RESTRICT ON UPDATE CASCADE, "
+             "FOREIGN KEY(whitebalance_id) REFERENCES whitebalance(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(flash_id) REFERENCES flash(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(exposure_program_id) REFERENCES exposure_program(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+             "FOREIGN KEY(metering_mode_id) REFERENCES metering_mode(id) ON DELETE CASCADE ON UPDATE CASCADE)",
+             "[init] can't create new table images");
+
+    TRY_EXEC("INSERT INTO images_new"
+             " SELECT id, group_id, film_id, width, height, filename,"
+             "        maker_id, model_id, lens_id, camera_id,"
+             "        exposure, aperture, iso, focal_length,"
+             "        focus_distance, datetime_taken, flags,"
+             "        output_width, output_height, crop,"
+             "        raw_parameters, raw_black, raw_maximum,"
+             "        orientation, longitude,"
+             "        latitude, altitude, color_matrix, colorspace, version,"
+             "        max_version, write_timestamp, history_end, position,"
+             "        aspect_ratio, exposure_bias,"
+             "        import_timestamp, change_timestamp, export_timestamp, print_timestamp,"
+             "        thumb_timestamp, thumb_maxmip,"
+             "        NULL, NULL, NULL, NULL"
+             "  FROM images",
+             "[init] can't populate new images table\n");
+
+    // NOTE: datetime_taken is in nano-second since "0001-01-01 00:00:00"
+    TRY_EXEC("DROP VIEW v_images",
+             "[init] can't drop v_images view\n");
+
+    TRY_EXEC("DROP TABLE images",
+             "[init] can't drop table images\n");
+
+    TRY_EXEC("ALTER TABLE images_new RENAME TO images",
+             "[init] can't rename images\n");
+
+    TRY_EXEC
+      ("CREATE VIEW v_images AS"
+       " SELECT mi.id AS id, mk.name AS maker, md.name AS model, ln.name AS lens,"
+       "        cm.maker || ' ' || cm.model AS normalized_camera, "
+       "        cm.alias AS camera_alias,"
+       "        exposure, aperture, iso,"
+       "        datetime(datetime_taken/1000000"
+       "                 + unixepoch('0001-01-01 00:00:00'), 'unixepoch') AS datetime,"
+       "        fr.folder AS folders, filename"
+       " FROM images AS mi,"
+       "      makers AS mk, models AS md, lens AS ln, cameras AS cm, film_rolls AS fr"
+       " WHERE mi.maker_id = mk.id"
+       "   AND mi.model_id = md.id"
+       "   AND mi.lens_id = ln.id"
+       "   AND mi.camera_id = cm.id"
+       "   AND mi.film_id = fr.id"
+       " ORDER BY normalized_camera, folders",
+       "[init] can't create view v_images\n");
+
+    // recreate the indexesx
+    TRY_EXEC("CREATE INDEX image_position_index ON images (position)",
+             "[init] can't add image_position_index\n");
+    TRY_EXEC("CREATE INDEX images_filename_index ON images (filename, version)",
+             "[init] can't recreate images_filename_index\n");
+    TRY_EXEC("CREATE INDEX images_film_id_index ON images (film_id, filename)",
+             "[init] can't recreate images_film_id_index\n");
+    TRY_EXEC("CREATE INDEX images_group_id_index ON images (group_id, id)",
+             "[init] can't recreate images_group_id_index\n");
+    TRY_EXEC("CREATE INDEX images_latlong_index ON images (latitude DESC, longitude DESC)",
+             "[init] can't add images_latlong_index\n");
+    TRY_EXEC("CREATE INDEX images_datetime_taken ON images (datetime_taken)",
+             "[init] can't create images_datetime_taken\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
+
+    new_version = 51;
+  }
+  else if(version == 51 || version == 52)
+  {
+    /* the code to create the DB schema from scratch had a temporary version that set the version number as 52
+       but did not create the index correctly (only this migration code was updated at the time), so
+       let's repeat the migration steps if we are potentially on that broken interim version 52 */
+
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    // As the selected_images table might have non-unique data the UNIQUE INDEX could fail,
+    // we avoid this by recreating both the table & index.
+    // minor downside: selection is lost while updating database sheme.
+    TRY_EXEC("DROP TABLE selected_images",
+             "[init] can't drop selected_images\n");
+
+    TRY_EXEC("CREATE TABLE selected_images (num INTEGER PRIMARY KEY AUTOINCREMENT, imgid INTEGER)",
+             "[init] can't create selected_images\n");
+
+    TRY_EXEC("CREATE UNIQUE INDEX selected_images_ni"
+             " ON selected_images (imgid)",
+             "[init] can't create index selected_images_ni\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    /* even if we were at version 51, the step is the same for 51 -> 52 and 52 -> 53 (see above), so jump straight to 53 */
+    new_version = 53;
+  }
+  else if(version == 53)
+  {
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = OFF", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    // NOTE: datetime_taken is in nano-second since "0001-01-01 00:00:00"
+    TRY_EXEC("DROP VIEW v_images",
+             "[init] can't drop v_images view\n");
+
+    TRY_EXEC
+      ("CREATE VIEW v_images AS"
+       " SELECT mi.id AS id, mk.name AS maker, md.name AS model, ln.name AS lens,"
+       "        cm.maker || ' ' || cm.model AS normalized_camera, "
+       "        cm.alias AS camera_alias,"
+       "        exposure, aperture, iso,"
+       "        datetime(datetime_taken/1000000"
+       "                 + unixepoch('0001-01-01 00:00:00'), 'unixepoch') AS datetime,"
+       "        fr.folder AS folders, filename"
+       " FROM images AS mi,"
+       "      makers AS mk, models AS md, lens AS ln, cameras AS cm, film_rolls AS fr"
+       " WHERE mi.maker_id = mk.id"
+       "   AND mi.model_id = md.id"
+       "   AND mi.lens_id = ln.id"
+       "   AND mi.camera_id = cm.id"
+       "   AND mi.film_id = fr.id"
+       " ORDER BY normalized_camera, folders",
+       "[init] can't create view v_images\n");
+
+    // meta data
+    TRY_EXEC("ALTER TABLE `meta_data` RENAME TO `meta_data_old`",
+             "[init] can't rename meta_data\n");
+    TRY_EXEC("CREATE TABLE `meta_data` (id integer, key integer, value varchar, "
+             "FOREIGN KEY(id) REFERENCES images(id) ON DELETE CASCADE ON UPDATE CASCADE)",
+             "[init] can't create new meta_data table\n");
+
+    TRY_EXEC("DELETE FROM `meta_data_old` WHERE id NOT IN (SELECT id FROM `images`)",
+             "[init] can't delete orphaned meta_data elements\n");
+
+    TRY_EXEC("INSERT INTO `meta_data` SELECT * FROM `meta_data_old`",
+             "[init] can't copy back from meta_data\n");
+
+    TRY_EXEC("DROP TABLE meta_data_old",
+             "[init] can't drop table meta_data_old\n");
+
+    TRY_EXEC("CREATE UNIQUE INDEX `metadata_index` ON `meta_data` (id, key, value)",
+             "[init] can't recreate metadata_index\n");
+
+    TRY_EXEC("CREATE INDEX main.metadata_index_key ON meta_data (key)",
+             "[init] can't recreate metadata_index\n");
+
+    TRY_EXEC("CREATE INDEX main.metadata_index_value ON meta_data (value)",
+             "[init] can't create metadata_index_value\n");
+
+    sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
+
+    new_version = 54;
+  }
+  else if(version == 54)
+  {
+    // NOTE: datetime_taken is in nano-second since "0001-01-01 00:00:00"
+    TRY_EXEC("DROP VIEW v_images",
+             "[init] can't drop v_images view\n");
+
+    TRY_EXEC
+      ("CREATE VIEW v_images AS"
+       " SELECT mi.id AS id, mk.name AS maker, md.name AS model, ln.name AS lens,"
+       "        cm.maker || ' ' || cm.model AS normalized_camera, "
+       "        cm.alias AS camera_alias,"
+       "        exposure, aperture, iso,"
+       "        datetime(datetime_taken/1000000"
+       "                 + unixepoch('0001-01-01 00:00:00'), 'unixepoch') AS datetime,"
+       "        fr.folder AS folders, filename"
+       " FROM images AS mi,"
+       "      makers AS mk, models AS md, lens AS ln, cameras AS cm, film_rolls AS fr"
+       " WHERE mi.maker_id = mk.id"
+       "   AND mi.model_id = md.id"
+       "   AND mi.lens_id = ln.id"
+       "   AND mi.camera_id = cm.id"
+       "   AND mi.film_id = fr.id"
+       " ORDER BY normalized_camera, folders",
+       "[init] can't create view v_images\n");
+
+    new_version = 55;
+  }
   else
     new_version = version; // should be the fallback so that calling code sees that we are in an infinite loop
 
   // write the new version to db
-  sqlite3_prepare_v2(db->handle, "INSERT OR REPLACE INTO main.db_info (key, value) VALUES ('version', ?1)", -1, &stmt,
+  sqlite3_prepare_v2(db->handle,
+                     "INSERT OR REPLACE"
+                     " INTO main.db_info (key, value)"
+                     " VALUES ('version', ?1)", -1, &stmt,
                      NULL);
   sqlite3_bind_int(stmt, 1, new_version);
   sqlite3_step(stmt);
@@ -2003,19 +2944,20 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
   }
   else if(version == 1)
   {
+    // clang-format off
     // style_items:
     //    NO TRY_EXEC has the column could be there before version 1 (master build)
     //    TRY_EXEC("ALTER TABLE data.style_items ADD COLUMN iop_order REAL",
     //             "[init] can't add `iop_order' column to style_items table in database\n");
     sqlite3_exec(db->handle, "ALTER TABLE data.style_items ADD COLUMN iop_order REAL", NULL, NULL, NULL);
-
+    // clang-format on
     sqlite3_stmt *sel_stmt = NULL;
     GList *prior_v1 = dt_ioppr_get_iop_order_list_version(DT_IOP_ORDER_LEGACY);
-
+    // clang-format off
     // create a temp table with the previous priorities
     TRY_EXEC("CREATE TEMPORARY TABLE iop_order_tmp (iop_order REAL, operation VARCHAR(256))",
              "[init] can't create temporary table for updating `data.style_items'\n");
-
+    // clang-format on
     // fill temp table with all operations up to this release
     // it will be used to create the pipe and update the iop_order on history
     for(GList *priorities = prior_v1; priorities; priorities = g_list_next(priorities))
@@ -2034,6 +2976,7 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
     g_list_free_full(prior_v1, free);
 
     // do the same as for history
+    // clang-format off
     TRY_EXEC("UPDATE data.style_items SET iop_order = ((("
         "SELECT MAX(multi_priority) FROM data.style_items style1 WHERE style1.styleid = data.style_items.styleid AND style1.operation = data.style_items.operation "
              ") + 1. - multi_priority) / 1000.) + "
@@ -2043,15 +2986,16 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
 
     TRY_PREPARE(sel_stmt, "SELECT DISTINCT operation FROM data.style_items WHERE iop_order <= 0 OR iop_order IS NULL",
                 "[init] can't prepare selecting style_items iop_order\n");
+    // clang-format on
     while(sqlite3_step(sel_stmt) == SQLITE_ROW)
     {
       const char *op_name = (const char *)sqlite3_column_text(sel_stmt, 0);
-      printf("operation %s with no iop_order while upgrading style_items in database\n", op_name);
+      dt_print(DT_DEBUG_ALWAYS, "[init] operation %s with no iop_order while upgrading style_items in database\n", op_name);
     }
     sqlite3_finalize(sel_stmt);
-
+    // clang-format off
     TRY_EXEC("DROP TABLE iop_order_tmp", "[init] can't drop table `iop_order_tmp' from database\n");
-
+    // clang-format on
     new_version = 2;
   }
   else if(version == 2)
@@ -2061,7 +3005,7 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
     //    With sqlite above or equal to 3.25.0 RENAME COLUMN can be used instead of the following code
     //    TRY_EXEC("ALTER TABLE data.tags RENAME COLUMN description TO synonyms;",
     //             "[init] can't change tags column name from description to synonyms\n");
-
+    // clang-format off
     TRY_EXEC("ALTER TABLE data.tags RENAME TO tmp_tags",  "[init] can't rename table tags\n");
 
     TRY_EXEC("CREATE TABLE data.tags (id INTEGER PRIMARY KEY, name VARCHAR, "
@@ -2076,7 +3020,7 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
 
     TRY_EXEC("CREATE UNIQUE INDEX data.tags_name_idx ON tags (name)",
              "[init] can't create tags_name_idx on tags table\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
 
     new_version = 3;
@@ -2084,7 +3028,7 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
   else if(version == 3)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     // create a temp table to invert all multi_priority
     TRY_EXEC("CREATE TEMPORARY TABLE m_prio (id INTEGER, operation VARCHAR(256), prio INTEGER)",
              "[init] can't create temporary table for updating `history and style_items'\n");
@@ -2101,6 +3045,7 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
              "[init] can't update multi_priority for style_items\n");
 
     TRY_EXEC("DROP TABLE m_prio", "[init] can't drop table `m_prio' from database\n");
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
 
     new_version = 4;
@@ -2108,7 +3053,7 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
   else if(version == 4)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format off
     // remove iop_order from style_item table
     TRY_EXEC("ALTER TABLE data.style_items RENAME TO s",
              "[init] can't rename style_items to s\n");
@@ -2122,7 +3067,7 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
              "[init] can't populate style_items table'\n");
     TRY_EXEC("DROP TABLE s",
              "[init] can't drop table s'\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
 
     new_version = 5;
@@ -2130,7 +3075,7 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
   else if(version == 5)
   {
     sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
-
+    // clang-format of
     // make style.id a PRIMARY KEY and add iop_list
     TRY_EXEC("ALTER TABLE data.styles RENAME TO s",
              "[init] can't rename styles to s\n");
@@ -2148,40 +3093,62 @@ static int _upgrade_data_schema_step(dt_database_t *db, int version)
 
     TRY_EXEC("CREATE INDEX IF NOT EXISTS data.style_items_styleid_index ON style_items (styleid)",
              "[init] can't create style_items_styleid_index\n");
-
+    // clang-format on
     sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
 
     new_version = 6;
   }
   else if(version == 6)
   {
+    // clang-format off
     TRY_EXEC("CREATE TABLE data.locations "
              "(tagid INTEGER PRIMARY KEY, type INTEGER, longitude REAL, latitude REAL, "
              "delta1 REAL, delta2 REAL, FOREIGN KEY(tagid) REFERENCES tags(id))",
              "[init] can't create new locations table\n");
-
+    // clang-format on
     new_version = 7;
   }
   else if(version == 7)
   {
+    // clang-format off
     TRY_EXEC("ALTER TABLE data.locations ADD COLUMN ratio FLOAT DEFAULT 1",
              "[init] can't add column `ratio' column to locations table\n");
-
+    // clang-format on
     new_version = 8;
   }
   else if(version == 8)
   {
+    // clang-format off
     TRY_EXEC("ALTER TABLE data.locations ADD COLUMN polygons BLOB",
              "[init] can't add column `polygons' column to locations table\n");
-
+    // clang-format on
     new_version = 9;
+  }
+  else if(version == 9)
+  {
+    TRY_EXEC("ALTER TABLE data.style_items ADD COLUMN multi_name_hand_edited INTEGER default 0",
+             "[init] can't add multi_name_hand_edited column\n");
+    TRY_EXEC("UPDATE data.style_items SET multi_name_hand_edited = 1 WHERE multi_name != ''",
+             "[init] can't set multi_name_hand_edited column\n");
+
+    TRY_EXEC("ALTER TABLE data.presets ADD COLUMN multi_name_hand_edited INTEGER default 0",
+             "[init] can't add multi_name_hand_edited column\n");
+    TRY_EXEC("UPDATE data.presets SET multi_name_hand_edited = 1 WHERE multi_name != ''",
+             "[init] can't set multi_name_hand_edited column\n");
+
+    new_version = 10;
   }
   else
     new_version = version; // should be the fallback so that calling code sees that we are in an infinite loop
 
   // write the new version to db
-  sqlite3_prepare_v2(db->handle, "INSERT OR REPLACE INTO data.db_info (key, value) VALUES ('version', ?1)", -1, &stmt,
+  // clang-format off¨
+  sqlite3_prepare_v2(db->handle,
+                     "INSERT OR REPLACE"
+                     " INTO data.db_info (key, value)"
+                     " VALUES ('version', ?1)", -1, &stmt,
                      NULL);
+  // clang-format on
   sqlite3_bind_int(stmt, 1, new_version);
   sqlite3_step(stmt);
   sqlite3_finalize(stmt);
@@ -2203,7 +3170,8 @@ static gboolean _upgrade_library_schema(dt_database_t *db, int version)
   {
     const int new_version = _upgrade_library_schema_step(db, version);
     if(new_version == version)
-      return FALSE; // we don't know how to upgrade this db. probably a bug in _upgrade_library_schema_step
+      return FALSE; // we don't know how to upgrade this db. probably
+                    // a bug in _upgrade_library_schema_step
     else
       version = new_version;
   }
@@ -2230,14 +3198,19 @@ static void _create_library_schema(dt_database_t *db)
 {
   sqlite3_stmt *stmt;
   ////////////////////////////// db_info
-  sqlite3_exec(db->handle, "CREATE TABLE main.db_info (key VARCHAR PRIMARY KEY, value VARCHAR)", NULL,
-               NULL, NULL);
-  sqlite3_prepare_v2(
-      db->handle, "INSERT OR REPLACE INTO main.db_info (key, value) VALUES ('version', ?1)", -1, &stmt, NULL);
+  // clang-format off
+  sqlite3_exec
+    (db->handle, "CREATE TABLE main.db_info (key VARCHAR PRIMARY KEY, value VARCHAR)",
+     NULL, NULL, NULL);
+  sqlite3_prepare_v2
+    (db->handle, "INSERT OR REPLACE INTO main.db_info (key, value) VALUES ('version', ?1)",
+     -1, &stmt, NULL);
+  // clang-format on
   sqlite3_bind_int(stmt, 1, CURRENT_DATABASE_VERSION_LIBRARY);
   sqlite3_step(stmt);
   sqlite3_finalize(stmt);
   ////////////////////////////// film_rolls
+  // clang-format off
   sqlite3_exec(db->handle,
                "CREATE TABLE main.film_rolls "
                "(id INTEGER PRIMARY KEY, access_timestamp INTEGER, "
@@ -2247,39 +3220,150 @@ static void _create_library_schema(dt_database_t *db)
                "folder VARCHAR(1024) NOT NULL)",
                NULL, NULL, NULL);
   sqlite3_exec(db->handle, "CREATE INDEX main.film_rolls_folder_index ON film_rolls (folder)", NULL, NULL, NULL);
+  ////////////////////////////// maker
+  sqlite3_exec(db->handle,
+               "CREATE TABLE main.makers"
+               " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+               "  name VARCHAR)",
+               NULL, NULL, NULL);
+  sqlite3_exec
+    (db->handle,
+     "CREATE INDEX makers_name ON makers (name)",
+     NULL, NULL, NULL);
+  ////////////////////////////// model
+  sqlite3_exec(db->handle,
+               "CREATE TABLE main.models"
+               " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+               "  name VARCHAR)",
+               NULL, NULL, NULL);
+  sqlite3_exec
+    (db->handle,
+     "CREATE INDEX models_name ON models (name)",
+     NULL, NULL, NULL);
+  ////////////////////////////// lens
+  sqlite3_exec(db->handle,
+               "CREATE TABLE main.lens"
+               " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+               "  name VARCHAR)",
+               NULL, NULL, NULL);
+  sqlite3_exec
+    (db->handle,
+     "CREATE INDEX lens_name ON lens (name)",
+     NULL, NULL, NULL);
+  ////////////////////////////// cameras
+  sqlite3_exec(db->handle,
+               "CREATE TABLE cameras"
+               " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+               "  maker VARCHAR, model VARCHAR,"
+               "  alias VARCHAR)",
+               NULL, NULL, NULL);
+  sqlite3_exec
+    (db->handle,
+     "CREATE UNIQUE INDEX cameras_name ON cameras (maker, model, alias)",
+     NULL, NULL, NULL);
+  ////////////////////////////// white balance
+  sqlite3_exec(db->handle,
+               "CREATE TABLE whitebalance"
+               " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+               "  name VARCHAR)",
+               NULL, NULL, NULL);
+  sqlite3_exec
+    (db->handle,
+     "CREATE UNIQUE INDEX whitebalance_name ON whitebalance (name)",
+     NULL, NULL, NULL);
+  ////////////////////////////// flash
+  sqlite3_exec(db->handle,
+               "CREATE TABLE flash"
+               " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+               "  name VARCHAR)",
+               NULL, NULL, NULL);
+  sqlite3_exec
+    (db->handle,
+     "CREATE UNIQUE INDEX flash_name ON flash (name)",
+     NULL, NULL, NULL);
+  ////////////////////////////// exposure program
+  sqlite3_exec(db->handle,
+               "CREATE TABLE exposure_program"
+               " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+               "  name VARCHAR)",
+               NULL, NULL, NULL);
+  sqlite3_exec
+    (db->handle,
+     "CREATE UNIQUE INDEX exposure_program_name ON exposure_program (name)",
+     NULL, NULL, NULL);
+  ////////////////////////////// metering mode
+  sqlite3_exec(db->handle,
+               "CREATE TABLE metering_mode"
+               " (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+               "  name VARCHAR)",
+               NULL, NULL, NULL);
+  sqlite3_exec
+    (db->handle,
+     "CREATE UNIQUE INDEX metering_mode_name ON metering_mode (name)",
+     NULL, NULL, NULL);
   ////////////////////////////// images
   sqlite3_exec(
       db->handle,
-      "CREATE TABLE main.images (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, film_id INTEGER, "
-      "width INTEGER, height INTEGER, filename VARCHAR, maker VARCHAR, model VARCHAR, "
-      "lens VARCHAR, exposure REAL, aperture REAL, iso REAL, focal_length REAL, "
-      "focus_distance REAL, datetime_taken CHAR(20), flags INTEGER, "
-      "output_width INTEGER, output_height INTEGER, crop REAL, "
-      "raw_parameters INTEGER, raw_denoise_threshold REAL, "
-      "raw_auto_bright_threshold REAL, raw_black INTEGER, raw_maximum INTEGER, "
-      "license VARCHAR, sha1sum CHAR(40), "
-      "orientation INTEGER, histogram BLOB, lightmap BLOB, longitude REAL, "
-      "latitude REAL, altitude REAL, color_matrix BLOB, colorspace INTEGER, version INTEGER, "
-      "max_version INTEGER, write_timestamp INTEGER, history_end INTEGER, position INTEGER, "
-      "aspect_ratio REAL, exposure_bias REAL, "
-      "import_timestamp INTEGER DEFAULT -1, change_timestamp INTEGER DEFAULT -1, "
-      "export_timestamp INTEGER DEFAULT -1, print_timestamp INTEGER DEFAULT -1, "
+      "CREATE TABLE main.images"
+      " (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, film_id INTEGER,"
+      "  width INTEGER, height INTEGER, filename VARCHAR,"
+      "  maker_id INTEGER, model_id INTEGER, lens_id INTEGER, camera_id INTEGER,"
+      "  exposure REAL, aperture REAL, iso REAL, focal_length REAL,"
+      "  focus_distance REAL, datetime_taken INTEGER, flags INTEGER,"
+      "  output_width INTEGER, output_height INTEGER, crop REAL,"
+      "  raw_parameters INTEGER, raw_black INTEGER, raw_maximum INTEGER,"
+      "  orientation INTEGER, longitude REAL,"
+      "  latitude REAL, altitude REAL, color_matrix BLOB, colorspace INTEGER,"
+      "  version INTEGER, max_version INTEGER, write_timestamp INTEGER,"
+      "  history_end INTEGER, position INTEGER, aspect_ratio REAL, exposure_bias REAL,"
+      "  import_timestamp INTEGER DEFAULT -1, change_timestamp INTEGER DEFAULT -1, "
+      "  export_timestamp INTEGER DEFAULT -1, print_timestamp INTEGER DEFAULT -1, "
+      "  thumb_timestamp INTEGER DEFAULT -1, thumb_maxmip INTEGER DEFAULT 0, "
+      "  whitebalance_id INTEGER, flash_id INTEGER, "
+      "  exposure_program_id INTEGER, metering_mode_id INTEGER, "
+      "FOREIGN KEY(maker_id) REFERENCES makers(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+      "FOREIGN KEY(model_id) REFERENCES models(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+      "FOREIGN KEY(lens_id) REFERENCES lens(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+      "FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE ON UPDATE CASCADE, "
       "FOREIGN KEY(film_id) REFERENCES film_rolls(id) ON DELETE CASCADE ON UPDATE CASCADE, "
-      "FOREIGN KEY(group_id) REFERENCES images(id) ON DELETE RESTRICT ON UPDATE CASCADE)",
+      "FOREIGN KEY(group_id) REFERENCES images(id) ON DELETE RESTRICT ON UPDATE CASCADE, "
+      "FOREIGN KEY(whitebalance_id) REFERENCES whitebalance(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+      "FOREIGN KEY(flash_id) REFERENCES flash(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+      "FOREIGN KEY(exposure_program_id) REFERENCES exposure_program(id) ON DELETE CASCADE ON UPDATE CASCADE, "
+      "FOREIGN KEY(metering_mode_id) REFERENCES metering_mode(id) ON DELETE CASCADE ON UPDATE CASCADE)",
       NULL, NULL, NULL);
-  sqlite3_exec(db->handle, "CREATE INDEX main.images_group_id_index ON images (group_id, id)", NULL, NULL, NULL);
-  sqlite3_exec(db->handle, "CREATE INDEX main.images_film_id_index ON images (film_id, filename)", NULL, NULL, NULL);
-  sqlite3_exec(db->handle, "CREATE INDEX main.images_filename_index ON images (filename, version)", NULL, NULL, NULL);
-  sqlite3_exec(db->handle, "CREATE INDEX main.image_position_index ON images (position)", NULL, NULL, NULL);
+  sqlite3_exec(db->handle,
+               "CREATE INDEX main.images_group_id_index ON images (group_id, id)",
+               NULL, NULL, NULL);
+  sqlite3_exec(db->handle,
+               "CREATE INDEX main.images_film_id_index ON images (film_id, filename)",
+               NULL, NULL, NULL);
+  sqlite3_exec(db->handle,
+               "CREATE INDEX main.images_filename_index ON images (filename, version)",
+               NULL, NULL, NULL);
+  sqlite3_exec(db->handle,
+               "CREATE INDEX main.image_position_index ON images (position)",
+               NULL, NULL, NULL);
+  sqlite3_exec(db->handle,
+               "CREATE INDEX main.images_datetime_taken_nc ON images (datetime_taken)",
+               NULL, NULL, NULL);
 
   ////////////////////////////// selected_images
-  sqlite3_exec(db->handle, "CREATE TABLE main.selected_images (imgid INTEGER PRIMARY KEY)", NULL, NULL, NULL);
+  sqlite3_exec(db->handle,
+               "CREATE TABLE main.selected_images (num INTEGER PRIMARY KEY AUTOINCREMENT,"
+               "                                   imgid INTEGER)",
+               NULL, NULL, NULL);
+
+  sqlite3_exec(db->handle,
+               "CREATE UNIQUE INDEX main.selected_images_ni"
+               " ON selected_images (imgid)",
+               NULL, NULL, NULL);
   ////////////////////////////// history
   sqlite3_exec(
       db->handle,
       "CREATE TABLE main.history (imgid INTEGER, num INTEGER, module INTEGER, "
       "operation VARCHAR(256), op_params BLOB, enabled INTEGER, "
-      "blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256), "
+      "blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256), multi_name_hand_edited INTEGER, "
       "FOREIGN KEY(imgid) REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE)",
       NULL, NULL, NULL);
   sqlite3_exec(db->handle, "CREATE INDEX main.history_imgid_op_index ON history (imgid, operation)", NULL, NULL, NULL);
@@ -2309,32 +3393,124 @@ static void _create_library_schema(dt_database_t *db)
   sqlite3_exec(db->handle, "CREATE UNIQUE INDEX main.color_labels_idx ON color_labels (imgid, color)", NULL, NULL,
                NULL);
   ////////////////////////////// meta_data
-  sqlite3_exec(db->handle, "CREATE TABLE main.meta_data (id INTEGER, key INTEGER, value VARCHAR)", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "CREATE TABLE main.meta_data (id INTEGER, key INTEGER, value VARCHAR, "
+                           "FOREIGN KEY(id) REFERENCES images(id) ON DELETE CASCADE ON UPDATE CASCADE)", NULL, NULL, NULL);
   sqlite3_exec(db->handle, "CREATE UNIQUE INDEX main.metadata_index ON meta_data (id, key, value)", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "CREATE INDEX main.metadata_index_key ON meta_data (key)", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "CREATE INDEX main.metadata_index_value ON meta_data (value)", NULL, NULL, NULL);
 
   sqlite3_exec(db->handle, "CREATE TABLE main.module_order (imgid INTEGER PRIMARY KEY, version INTEGER, iop_list VARCHAR)",
                NULL, NULL, NULL);
-  sqlite3_exec(db->handle, "CREATE TABLE main.history_hash (imgid INTEGER PRIMARY KEY, "
-               "basic_hash BLOB, auto_hash BLOB, current_hash BLOB, mipmap_hash BLOB, "
-               "FOREIGN KEY(imgid) REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE)",
-               NULL, NULL, NULL);
+  sqlite3_exec
+    (db->handle, "CREATE TABLE main.history_hash"
+     " (imgid INTEGER PRIMARY KEY,"
+     "  basic_hash BLOB, auto_hash BLOB, current_hash BLOB,"
+     "  mipmap_hash BLOB,"
+     "  FOREIGN KEY(imgid) REFERENCES images(id) ON UPDATE CASCADE ON DELETE CASCADE)",
+     NULL, NULL, NULL);
 
   // v34
   sqlite3_exec(db->handle, "CREATE INDEX main.images_datetime_taken_nc ON images (datetime_taken COLLATE NOCASE)",
                NULL, NULL, NULL);
   sqlite3_exec(db->handle, "CREATE INDEX main.metadata_index_key ON meta_data (key)", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "CREATE INDEX main.metadata_index_value ON meta_data (value)", NULL, NULL, NULL);
 
+  sqlite3_exec
+    (db->handle,
+     "CREATE TABLE harmony_guide"
+     " (imgid INTEGER PRIMARY KEY,"
+     "  type INTEGER, rotation INTEGER, width INTEGER,"
+     "  FOREIGN KEY(imgid) REFERENCES images(id)"
+     "    ON UPDATE CASCADE ON DELETE CASCADE)",
+     NULL, NULL, NULL);
+
+  sqlite3_exec
+    (db->handle,
+     "CREATE TABLE overlay"
+     " (imgid INTEGER, overlay_id INTEGER,"
+     "  PRIMARY KEY (imgid, overlay_id),"
+     "  FOREIGN KEY(imgid) REFERENCES images(id)"
+     "    ON UPDATE CASCADE ON DELETE CASCADE)",
+     NULL, NULL, NULL);
+
+  // Some triggers to remove possible dangling refs in makers/models/lens/cameras
+  sqlite3_exec
+    (db->handle,
+     "CREATE TRIGGER remove_makers AFTER DELETE ON images"
+     " BEGIN"
+     "  DELETE FROM makers"
+     "    WHERE id = OLD.maker_id"
+     "      AND NOT EXISTS (SELECT 1 FROM images WHERE maker_id = OLD.maker_id);"
+     " END",
+     NULL, NULL, NULL);
+
+  sqlite3_exec
+    (db->handle,
+     "CREATE TRIGGER remove_models AFTER DELETE ON images"
+     " BEGIN"
+     "  DELETE FROM models"
+     "    WHERE id = OLD.model_id"
+     "      AND NOT EXISTS (SELECT 1 FROM images WHERE model_id = OLD.model_id);"
+     " END",
+     NULL, NULL, NULL);
+
+  sqlite3_exec
+    (db->handle,
+     "CREATE TRIGGER remove_lens AFTER DELETE ON images"
+     " BEGIN"
+     "  DELETE FROM lens"
+     "    WHERE id = OLD.lens_id"
+     "      AND NOT EXISTS (SELECT 1 FROM images WHERE lens_id = OLD.lens_id);"
+     " END",
+     NULL, NULL, NULL);
+
+  sqlite3_exec
+    (db->handle,
+     "CREATE TRIGGER remove_cameras AFTER DELETE ON images"
+     " BEGIN"
+     "  DELETE FROM cameras"
+     "    WHERE id = OLD.camera_id"
+     "      AND NOT EXISTS (SELECT 1 FROM images WHERE camera_id = OLD.camera_id);"
+     " END",
+     NULL, NULL, NULL);
+
+  // Finally some views to ease walking the data
+
+  // NOTE: datetime_taken is in nano-second since "0001-01-01 00:00:00"
+  sqlite3_exec
+    (db->handle,
+    "CREATE VIEW v_images AS"
+    " SELECT mi.id AS id, mk.name AS maker, md.name AS model, ln.name AS lens,"
+    "        cm.maker || ' ' || cm.model AS normalized_camera, "
+    "        cm.alias AS camera_alias,"
+    "        exposure, aperture, iso,"
+    "        datetime(datetime_taken/1000000"
+    "                 + unixepoch('0001-01-01 00:00:00'), 'unixepoch') AS datetime,"
+    "        fr.folder AS folders, filename"
+    " FROM images AS mi,"
+    "      makers AS mk, models AS md, lens AS ln, cameras AS cm, film_rolls AS fr"
+    " WHERE mi.maker_id = mk.id"
+    "   AND mi.model_id = md.id"
+    "   AND mi.lens_id = ln.id"
+    "   AND mi.camera_id = cm.id"
+    "   AND mi.film_id = fr.id"
+    " ORDER BY normalized_camera, folders",
+     NULL, NULL, NULL);
+  // clang-format on
 }
 
 /* create the current database schema and set the version in db_info accordingly */
 static void _create_data_schema(dt_database_t *db)
 {
   sqlite3_stmt *stmt;
+  // clang-format off
   ////////////////////////////// db_info
-  sqlite3_exec(db->handle, "CREATE TABLE data.db_info (key VARCHAR PRIMARY KEY, value VARCHAR)", NULL,
-               NULL, NULL);
-  sqlite3_prepare_v2(
-        db->handle, "INSERT OR REPLACE INTO data.db_info (key, value) VALUES ('version', ?1)", -1, &stmt, NULL);
+  sqlite3_exec
+    (db->handle, "CREATE TABLE data.db_info (key VARCHAR PRIMARY KEY, value VARCHAR)",
+     NULL, NULL, NULL);
+  sqlite3_prepare_v2
+    (db->handle, "INSERT OR REPLACE INTO data.db_info (key, value) VALUES ('version', ?1)",
+     -1, &stmt, NULL);
   sqlite3_bind_int(stmt, 1, CURRENT_DATABASE_VERSION_DATA);
   sqlite3_step(stmt);
   sqlite3_finalize(stmt);
@@ -2349,9 +3525,11 @@ static void _create_data_schema(dt_database_t *db)
   ////////////////////////////// style_items
   sqlite3_exec(
       db->handle,
-      "CREATE TABLE data.style_items (styleid INTEGER, num INTEGER, module INTEGER, "
-      "operation VARCHAR(256), op_params BLOB, enabled INTEGER, "
-      "blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))",
+      "CREATE TABLE data.style_items (styleid INTEGER, num INTEGER, module INTEGER,"
+      "                               operation VARCHAR(256), op_params BLOB, enabled INTEGER,"
+      "                               blendop_params BLOB, blendop_version INTEGER,"
+      "                               multi_priority INTEGER, multi_name VARCHAR(256),"
+      "                               multi_name_hand_edited INTEGER)",
       NULL, NULL, NULL);
   sqlite3_exec(
       db->handle,
@@ -2362,6 +3540,7 @@ static void _create_data_schema(dt_database_t *db)
                            "VARCHAR, op_version INTEGER, op_params BLOB, "
                            "enabled INTEGER, blendop_params BLOB, blendop_version INTEGER, "
                            "multi_priority INTEGER, multi_name VARCHAR(256), "
+                           "multi_name_hand_edited INTEGER, "
                            "model VARCHAR, maker VARCHAR, lens VARCHAR, iso_min REAL, iso_max REAL, "
                            "exposure_min REAL, exposure_max REAL, "
                            "aperture_min REAL, aperture_max REAL, focal_length_min REAL, "
@@ -2374,12 +3553,14 @@ static void _create_data_schema(dt_database_t *db)
   sqlite3_exec(db->handle, "CREATE TABLE data.locations (tagid INTEGER PRIMARY KEY, "
                "type INTEGER, longitude REAL, latitude REAL, delta1 REAL, delta2 REAL, ratio FLOAT, polygons BLOB, "
                "FOREIGN KEY(tagid) REFERENCES tags(id))", NULL, NULL, NULL);
+  // clang-format on
 }
 
 // create the in-memory tables
 // temporary stuff for some ops, need this for some reason with newer sqlite3:
 static void _create_memory_schema(dt_database_t *db)
 {
+  // clang-format off
   sqlite3_exec(db->handle, "CREATE TABLE memory.color_labels_temp (imgid INTEGER PRIMARY KEY)", NULL, NULL, NULL);
   sqlite3_exec(
       db->handle,
@@ -2395,23 +3576,23 @@ static void _create_memory_schema(dt_database_t *db)
   sqlite3_exec(
       db->handle,
       "CREATE TABLE memory.history (imgid INTEGER, num INTEGER, module INTEGER, "
-      "operation VARCHAR(256) UNIQUE ON CONFLICT REPLACE, op_params BLOB, enabled INTEGER, "
-      "blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))",
-      NULL, NULL, NULL);
-  sqlite3_exec(
-      db->handle,
-      "CREATE TABLE memory.undo_history (id INTEGER, imgid INTEGER, num INTEGER, module INTEGER, "
       "operation VARCHAR(256), op_params BLOB, enabled INTEGER, "
-      "blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256))",
+      "blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256), multi_name_hand_edited INTEGER, CONSTRAINT opprio UNIQUE (operation, multi_priority))",
       NULL, NULL, NULL);
   sqlite3_exec(
       db->handle,
-      "CREATE TABLE memory.undo_masks_history (id INTEGER, imgid INTEGER, num INTEGER, formid INTEGER,"
+      "CREATE TABLE memory.snapshot_history (id INTEGER, imgid INTEGER, num INTEGER, module INTEGER, "
+      "operation VARCHAR(256), op_params BLOB, enabled INTEGER, "
+      "blendop_params BLOB, blendop_version INTEGER, multi_priority INTEGER, multi_name VARCHAR(256), multi_name_hand_edited INTEGER)",
+      NULL, NULL, NULL);
+  sqlite3_exec(
+      db->handle,
+      "CREATE TABLE memory.snapshot_masks_history (id INTEGER, imgid INTEGER, num INTEGER, formid INTEGER,"
       " form INTEGER, name VARCHAR(256), version INTEGER, points BLOB, points_count INTEGER, source BLOB)",
       NULL, NULL, NULL);
   sqlite3_exec(
       db->handle,
-      "CREATE TABLE memory.undo_module_order (id INTEGER, imgid INTEGER, version INTEGER, iop_list VARCHAR)",
+      "CREATE TABLE memory.snapshot_module_order (id INTEGER, imgid INTEGER, version INTEGER, iop_list VARCHAR)",
       NULL, NULL, NULL);
   sqlite3_exec(db->handle,
       "CREATE TABLE memory.darktable_iop_names (operation VARCHAR(256) PRIMARY KEY, name VARCHAR(256))",
@@ -2419,43 +3600,43 @@ static void _create_memory_schema(dt_database_t *db)
   sqlite3_exec(db->handle,
       "CREATE TABLE memory.film_folder (id INTEGER PRIMARY KEY, status INTEGER)",
       NULL, NULL, NULL);
+  // clang-format on
 }
 
 static void _sanitize_db(dt_database_t *db)
 {
   sqlite3_stmt *stmt, *innerstmt;
-
+  // clang-format off
   /* first let's get rid of non-utf8 tags. */
   sqlite3_prepare_v2(db->handle, "SELECT id, name FROM data.tags", -1, &stmt, NULL);
   sqlite3_prepare_v2(db->handle, "UPDATE data.tags SET name = ?1 WHERE id = ?2", -1, &innerstmt, NULL);
+  // clang-format on
   while(sqlite3_step(stmt) == SQLITE_ROW)
   {
     const int id = sqlite3_column_int(stmt, 0);
     const char *tag = (const char *)sqlite3_column_text(stmt, 1);
 
-    if(!g_utf8_validate(tag, -1, NULL))
+    if(tag && !g_utf8_validate(tag, -1, NULL))
     {
       gchar *new_tag = dt_util_foo_to_utf8(tag);
-      fprintf(stderr, "[init]: tag `%s' is not valid utf8, replacing it with `%s'\n", tag, new_tag);
-      if(tag)
-      {
-        sqlite3_bind_text(innerstmt, 1, new_tag, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(innerstmt, 2, id);
-        sqlite3_step(innerstmt);
-        sqlite3_reset(innerstmt);
-        sqlite3_clear_bindings(innerstmt);
-        g_free(new_tag);
-      }
+      dt_print(DT_DEBUG_ALWAYS,
+               "[init]: tag `%s' is not valid utf8, replacing it with `%s'\n", tag, new_tag);
+      sqlite3_bind_text(innerstmt, 1, new_tag, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int(innerstmt, 2, id);
+      sqlite3_step(innerstmt);
+      sqlite3_reset(innerstmt);
+      sqlite3_clear_bindings(innerstmt);
+      g_free(new_tag);
     }
   }
   sqlite3_finalize(stmt);
   sqlite3_finalize(innerstmt);
-
+  // clang-format off
   // make sure film_roll folders don't end in "/", that will result in empty entries in the collect module
   sqlite3_exec(db->handle,
                "UPDATE main.film_rolls SET folder = substr(folder, 1, length(folder) - 1) WHERE folder LIKE '%/'",
                NULL, NULL, NULL);
-
+  // clang-format on
 }
 
 // in library we keep the names of the tags used in tagged_images. however, using that table at runtime results
@@ -2465,8 +3646,8 @@ static void _sanitize_db(dt_database_t *db)
   {                                                                                \
     if(sqlite3_exec(db->handle, _query, NULL, NULL, NULL) != SQLITE_OK)            \
     {                                                                              \
-      fprintf(stderr, _message);                                                   \
-      fprintf(stderr, "[init]   %s\n", sqlite3_errmsg(db->handle));                \
+      dt_print(DT_DEBUG_ALWAYS, _message);                                         \
+      dt_print(DT_DEBUG_ALWAYS, "[init]   %s\n", sqlite3_errmsg(db->handle));      \
       FINALIZE;                                                                    \
       sqlite3_exec(db->handle, "ROLLBACK TRANSACTION", NULL, NULL, NULL);          \
       return FALSE;                                                                \
@@ -2478,8 +3659,8 @@ static void _sanitize_db(dt_database_t *db)
   {                                                                                \
     if(sqlite3_step(_stmt) != _expected)                                           \
     {                                                                              \
-      fprintf(stderr, _message);                                                   \
-      fprintf(stderr, "[init]   %s\n", sqlite3_errmsg(db->handle));                \
+      dt_print(DT_DEBUG_ALWAYS, _message);                                         \
+      dt_print(DT_DEBUG_ALWAYS, "[init]   %s\n", sqlite3_errmsg(db->handle));      \
       FINALIZE;                                                                    \
       sqlite3_exec(db->handle, "ROLLBACK TRANSACTION", NULL, NULL, NULL);          \
       return FALSE;                                                                \
@@ -2491,8 +3672,8 @@ static void _sanitize_db(dt_database_t *db)
   {                                                                                \
     if(sqlite3_prepare_v2(db->handle, _query, -1, &_stmt, NULL) != SQLITE_OK)      \
     {                                                                              \
-      fprintf(stderr, _message);                                                   \
-      fprintf(stderr, "[init]   %s\n", sqlite3_errmsg(db->handle));                \
+      dt_print(DT_DEBUG_ALWAYS, _message);                                         \
+      dt_print(DT_DEBUG_ALWAYS, "[init]   %s\n", sqlite3_errmsg(db->handle));      \
       FINALIZE;                                                                    \
       sqlite3_exec(db->handle, "ROLLBACK TRANSACTION", NULL, NULL, NULL);          \
       return FALSE;                                                                \
@@ -2517,7 +3698,11 @@ void dt_database_show_error(const dt_database_t *db)
     char lck_pathname[1024];
     snprintf(lck_pathname, sizeof(lck_pathname), "%s.lock", db->error_dbfilename);
     char *lck_dirname = g_strdup(lck_pathname);
-    *g_strrstr(lck_dirname, "/") = '\0';
+    char *last_dirsep_position = g_strrstr(lck_dirname, G_DIR_SEPARATOR_S);
+    if(last_dirsep_position)
+      *last_dirsep_position = '\0';  // make lck_dirname contain only the directory name
+
+    // clang-format off
     char *label_text = g_markup_printf_escaped(
         _("\n"
           "  Sorry, darktable could not be started (database is locked)\n"
@@ -2528,26 +3713,31 @@ void dt_database_show_error(const dt_database_t *db)
           "      click cancel and either use that instance or close it before attempting to rerun darktable \n"
           "      (process ID <i><b>%d</b></i> created the database locks)\n"
           "\n"
-          "  2 - If you can't find a running instance of darktable, try restarting your session or your computer. \n"
+          "  2 - If you closed darktable within the past few minutes, it may still be running in the background \n"
+          "      to export images, update sidecar files, or perform database maintenance. Try again once \n"
+          "      this processing finishes.\n"
+          "\n"
+          "  3 - If you can't find a running instance of darktable, try restarting your session or your computer. \n"
           "      This will close all running programs and hopefully close the databases correctly. \n"
           "\n"
-          "  3 - If you have done this or are certain that no other instances of darktable are running, \n"
+          "  4 - If you have done this or are certain that no other instances of darktable are running, \n"
           "      this probably means that the last instance was ended abnormally. \n"
           "      Click on the \"delete database lock files\" button to remove the files <i>data.db.lock</i> and <i>library.db.lock</i>.  \n"
           "\n\n"
           "      <i><u>Caution!</u> Do not delete these files without first undertaking the above checks, \n"
           "      otherwise you risk generating serious inconsistencies in your database.</i>\n"),
       db->error_other_pid);
+    // clang-format on
 
     gboolean delete_lockfiles = dt_gui_show_standalone_yes_no_dialog(_("error starting darktable"),
-                                        label_text, _("cancel"), _("delete database lock files"));
+                                        label_text, _("_cancel"), _("_delete database lock files"));
 
     if(delete_lockfiles)
     {
       gboolean really_delete_lockfiles =
         dt_gui_show_standalone_yes_no_dialog
         (_("are you sure?"),
-         _("\ndo you really want to delete the lock files?\n"), _("no"), _("yes"));
+         _("\ndo you really want to delete the lock files?\n"), _("_no"), _("_yes"));
       if(really_delete_lockfiles)
       {
         int status = 0;
@@ -2555,6 +3745,7 @@ void dt_database_show_error(const dt_database_t *db)
         char *lck_filename = g_strconcat(lck_dirname, "/data.db.lock", NULL);
         if(g_access(lck_filename, F_OK) != -1)
           status += remove(lck_filename);
+        g_free(lck_filename);
 
         lck_filename = g_strconcat(lck_dirname, "/library.db.lock", NULL);
         if(g_access(lck_filename, F_OK) != -1)
@@ -2564,14 +3755,14 @@ void dt_database_show_error(const dt_database_t *db)
         if(status==0)
           dt_gui_show_standalone_yes_no_dialog(_("done"),
                                         _("\nsuccessfully deleted the lock files.\nyou can now restart darktable\n"),
-                                        _("ok"), NULL);
+                                        _("_ok"), NULL);
         else
           dt_gui_show_standalone_yes_no_dialog
             (_("error"), g_markup_printf_escaped(
               _("\nat least one file could not be removed.\n"
                 "you may try to manually delete the files <i>data.db.lock</i> and <i>library.db.lock</i>\n"
                 "in folder <a href=\"file:///%s\">%s</a>.\n"), lck_dirname, lck_dirname),
-             _("ok"), NULL);
+             _("_ok"), NULL);
       }
     }
 
@@ -2681,16 +3872,17 @@ lock_again:
           }
           else
           {
-            fprintf(
-              stderr,
-              "[init] the database lock file contains a pid that seems to be alive in your system: %d\n",
-              db->error_other_pid);
-            db->error_message = g_strdup_printf(_("the database lock file contains a pid that seems to be alive in your system: %d"), db->error_other_pid);
+            dt_print(DT_DEBUG_ALWAYS,
+                     "[init] the database lock file contains a pid that seems to be alive in your system: %d\n",
+                     db->error_other_pid);
+            db->error_message
+              = g_strdup_printf(_("the database lock file contains a pid that seems to be alive in your system: %d"),
+                                db->error_other_pid);
           }
         }
         else
         {
-          fprintf(stderr, "[init] the database lock file seems to be empty\n");
+          dt_print(DT_DEBUG_ALWAYS, "[init] the database lock file seems to be empty\n");
           db->error_message = g_strdup_printf(_("the database lock file seems to be empty"));
         }
         close(fd);
@@ -2698,7 +3890,9 @@ lock_again:
       else
       {
         int err = errno;
-        fprintf(stderr, "[init] error opening the database lock file for reading: %s\n", strerror(err));
+        dt_print(DT_DEBUG_ALWAYS,
+                 "[init] error opening the database lock file for reading: %s\n",
+                 strerror(err));
         db->error_message = g_strdup_printf(_("error opening the database lock file for reading: %s"), strerror(err));
       }
     }
@@ -2725,12 +3919,68 @@ static gboolean _lock_databases(dt_database_t *db)
   return TRUE;
 }
 
-void ask_for_upgrade(const gchar *dbname, const gboolean has_gui)
+static gboolean _upgrade_camera_table(const dt_database_t *db)
+{
+  gboolean res = TRUE;
+  sqlite3_stmt *stmt;
+  sqlite3_stmt *innerstmt;
+
+  sqlite3_prepare_v2(db->handle,
+                     "SELECT mi.id, mk.name, md.name"
+                     " FROM main.images AS mi, main.makers AS mk, main.models AS md"
+                     " WHERE mi.maker_id = mk.id"
+                     "   AND mi.model_id = md.id",
+                     -1, &stmt, NULL);
+
+  sqlite3_prepare_v2(db->handle,
+                     "UPDATE main.images SET camera_id = ?1 WHERE id = ?2",
+                     -1, &innerstmt, NULL);
+
+  while(sqlite3_step(stmt) == SQLITE_ROW)
+  {
+    const dt_imgid_t imgid = sqlite3_column_int(stmt, 0);
+    const char *maker = (const char *)sqlite3_column_text(stmt, 1);
+    const char *model = (const char *)sqlite3_column_text(stmt, 2);
+
+    const int32_t camera_id = dt_image_get_camera_id(maker, model);
+
+    sqlite3_bind_int(innerstmt, 1, camera_id);
+    sqlite3_bind_int(innerstmt, 2, imgid);
+    sqlite3_step(innerstmt);
+    sqlite3_reset(innerstmt);
+    sqlite3_clear_bindings(innerstmt);
+  }
+
+  sqlite3_finalize(stmt);
+  sqlite3_finalize(innerstmt);
+
+  return res;
+}
+
+static void _too_new_db_version(const gchar *dbname, const gboolean has_gui)
+{
+  if(!has_gui)
+    exit(1);
+
+  char *label_text = g_markup_printf_escaped
+    (_("the database schema version of\n"
+       "\n"
+       "<span style='italic'>%s</span>\n"
+       "\n"
+       "is too new for this build of darktable "
+       "(this means the database was created or upgraded by a newer darktable version)\n"),
+       dbname);
+  dt_gui_show_standalone_yes_no_dialog(_("darktable - too new db version"), label_text,
+                                         _("_quit darktable"), NULL);
+  g_free(label_text);
+}
+
+static void _ask_for_upgrade(const gchar *dbname, const gboolean has_gui)
 {
   // if there's no gui just leave
   if(!has_gui)
   {
-    fprintf(stderr, "[init] database `%s' is out-of-date. aborting.\n", dbname);
+    dt_print(DT_DEBUG_ALWAYS, "[init] database `%s' is out-of-date. aborting.\n", dbname);
     exit(1);
   }
 
@@ -2745,14 +3995,14 @@ void ask_for_upgrade(const gchar *dbname, const gboolean has_gui)
 
   gboolean shall_we_update_the_db =
     dt_gui_show_standalone_yes_no_dialog(_("darktable - schema migration"), label_text,
-                                         _("close darktable"), _("upgrade database"));
+                                         _("_close darktable"), _("_upgrade database"));
 
   g_free(label_text);
 
   // if no upgrade, we exit now, nothing we can do more
   if(!shall_we_update_the_db)
   {
-    fprintf(stderr, "[init] we shall not update the database, aborting.\n");
+    dt_print(DT_DEBUG_ALWAYS, "[init] we shall not update the database, aborting.\n");
     exit(1);
   }
 }
@@ -2791,7 +4041,7 @@ void dt_database_backup(const char *filename)
       int fd = g_open(backup, O_CREAT, S_IRUSR);
       if(fd < 0 || !g_close(fd, &gerror)) copy_status = FALSE;
     }
-    if(!copy_status) fprintf(stderr, "[backup failed] %s -> %s\n", filename, backup);
+    if(!copy_status) dt_print(DT_DEBUG_ALWAYS, "[backup failed] %s -> %s\n", filename, backup);
 
     g_object_unref(src);
     g_object_unref(dest);
@@ -2869,11 +4119,11 @@ start:
   {
     dbname = dt_conf_get_string("database");
     if(!dbname)
-      snprintf(dbfilename_library, sizeof(dbfilename_library), "%s/library.db", datadir);
+      snprintf(dbfilename_library, sizeof(dbfilename_library), "%s%slibrary.db", datadir, G_DIR_SEPARATOR_S);
     else if(!strcmp(dbname, ":memory:"))
       g_strlcpy(dbfilename_library, dbname, sizeof(dbfilename_library));
     else if(dbname[0] != '/')
-      snprintf(dbfilename_library, sizeof(dbfilename_library), "%s/%s", datadir, dbname);
+      snprintf(dbfilename_library, sizeof(dbfilename_library), "%s%s%s", datadir, G_DIR_SEPARATOR_S, dbname);
     else
       g_strlcpy(dbfilename_library, dbname, sizeof(dbfilename_library));
   }
@@ -2889,7 +4139,7 @@ start:
   /* we also need a 2nd db with permanent data like presets, styles and tags */
   char dbfilename_data[PATH_MAX] = { 0 };
   if(load_data)
-    snprintf(dbfilename_data, sizeof(dbfilename_data), "%s/data.db", datadir);
+    snprintf(dbfilename_data, sizeof(dbfilename_data), "%s%sdata.db", datadir, G_DIR_SEPARATOR_S);
   else
     snprintf(dbfilename_data, sizeof(dbfilename_data), ":memory:");
 
@@ -2917,7 +4167,8 @@ start:
     dt_database_backup(dbfilename_library);
   }
 
-  dt_print(DT_DEBUG_SQL, "[init sql] library: %s, data: %s\n", dbfilename_library, dbfilename_data);
+  dt_print(DT_DEBUG_SQL, "[init sql] library: %s, data: %s\n",
+           dbfilename_library, dbfilename_data);
 
   /* having more than one instance of darktable using the same database is a bad idea */
   /* try to get locks for the databases */
@@ -2925,7 +4176,8 @@ start:
 
   if(!db->lock_acquired)
   {
-    fprintf(stderr, "[init] database is locked, probably another process is already using it\n");
+    dt_print(DT_DEBUG_ALWAYS,
+             "[init] database is locked, probably another process is already using it\n");
     g_free(dbname);
     return db;
   }
@@ -2934,14 +4186,15 @@ start:
   /* opening / creating database */
   if(sqlite3_open(db->dbfilename_library, &db->handle))
   {
-    fprintf(stderr, "[init] could not find database ");
+    dt_print(DT_DEBUG_ALWAYS, "[init] could not find database ");
     if(dbname)
-      fprintf(stderr, "`%s'!\n", dbname);
+      dt_print(DT_DEBUG_ALWAYS, "`%s'!\n", dbname);
     else
-      fprintf(stderr, "\n");
-    fprintf(stderr, "[init] maybe your %s/darktablerc is corrupt?\n", datadir);
+      dt_print(DT_DEBUG_ALWAYS, "\n");
+    dt_print(DT_DEBUG_ALWAYS, "[init] maybe your %s/darktablerc is corrupt?\n", datadir);
     dt_loc_get_datadir(dbfilename_library, sizeof(dbfilename_library));
-    fprintf(stderr, "[init] try `cp %s/darktablerc %s/darktablerc'\n", dbfilename_library, datadir);
+    dt_print(DT_DEBUG_ALWAYS, "[init] try `cp %s/darktablerc %s/darktablerc'\n",
+             dbfilename_library, datadir);
     sqlite3_close(db->handle);
     g_free(dbname);
     g_free(db->lockfile_data);
@@ -2965,7 +4218,8 @@ start:
   if(rc != SQLITE_OK || sqlite3_step(stmt) != SQLITE_DONE)
   {
     sqlite3_finalize(stmt);
-    fprintf(stderr, "[init] database `%s' couldn't be opened. aborting\n", dbfilename_data);
+    dt_print(DT_DEBUG_ALWAYS, "[init] database `%s' couldn't be opened. aborting\n",
+             dbfilename_data);
     dt_database_destroy(db);
     db = NULL;
     goto error;
@@ -2992,7 +4246,9 @@ start:
   else
   {
     gchar* data_status = _get_pragma_string_val(db->handle, "data.quick_check");
-    rc = sqlite3_prepare_v2(db->handle, "select value from data.db_info where key = 'version'", -1, &stmt, NULL);
+    rc = sqlite3_prepare_v2(db->handle,
+                            "SELECT value FROM data.db_info WHERE key = 'version'",
+                            -1, &stmt, NULL);
     if(!g_strcmp0(data_status, "ok") && rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW)
     {
       g_free(data_status); // status is OK and we don't need to care :)
@@ -3001,20 +4257,21 @@ start:
       sqlite3_finalize(stmt);
       if(db_version < CURRENT_DATABASE_VERSION_DATA)
       {
-        ask_for_upgrade(dbfilename_data, has_gui);
+        _ask_for_upgrade(dbfilename_data, has_gui);
 
         // older: upgrade
         if(!_upgrade_data_schema(db, db_version))
         {
           // we couldn't upgrade the db for some reason. bail out.
-          fprintf(stderr, "[init] database `%s' couldn't be upgraded from version %d to %d. aborting\n",
-                  dbfilename_data, db_version, CURRENT_DATABASE_VERSION_DATA);
+          dt_print(DT_DEBUG_ALWAYS,
+                   "[init] database `%s' couldn't be upgraded from version %d to %d. aborting\n",
+                   dbfilename_data, db_version, CURRENT_DATABASE_VERSION_DATA);
           dt_database_destroy(db);
           db = NULL;
           goto error;
         }
 
-        // upgrade was successfull, time for some housekeeping
+        // upgrade was successful, time for some housekeeping
         sqlite3_exec(db->handle, "VACUUM data", NULL, NULL, NULL);
         sqlite3_exec(db->handle, "ANALYZE data", NULL, NULL, NULL);
 
@@ -3022,8 +4279,10 @@ start:
       else if(db_version > CURRENT_DATABASE_VERSION_DATA)
       {
         // newer: bail out
-        fprintf(stderr, "[init] database version of `%s' is too new for this build of darktable. aborting\n",
-                dbfilename_data);
+        _too_new_db_version(dbfilename_data, has_gui);
+        dt_print(DT_DEBUG_ALWAYS,
+                 "[init] database version of `%s' is too new for this build of darktable. aborting\n",
+                 dbfilename_data);
         dt_database_destroy(db);
         db = NULL;
         goto error;
@@ -3058,12 +4317,9 @@ start:
         dialog = gtk_dialog_new_with_buttons(_("darktable - error opening database"),
                                             NULL,
                                             dflags,
-                                            _("close darktable"),
-                                            GTK_RESPONSE_CLOSE,
-                                            _("attempt restore"),
-                                            GTK_RESPONSE_ACCEPT,
-                                            _("delete database"),
-                                            GTK_RESPONSE_REJECT,
+                                            _("_close darktable"), GTK_RESPONSE_CLOSE,
+                                            _("_attempt restore"), GTK_RESPONSE_ACCEPT,
+                                            _("_delete database"), GTK_RESPONSE_REJECT,
                                             NULL);
         gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
         label_options = _("do you want to close darktable now to manually restore\n"
@@ -3076,10 +4332,8 @@ start:
         dialog = gtk_dialog_new_with_buttons(_("darktable - error opening database"),
                                             NULL,
                                             dflags,
-                                            _("close darktable"),
-                                            GTK_RESPONSE_CLOSE,
-                                            _("delete database"),
-                                            GTK_RESPONSE_REJECT,
+                                            _("_close darktable"), GTK_RESPONSE_CLOSE,
+                                            _("_delete database"), GTK_RESPONSE_REJECT,
                                             NULL);
         gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_CLOSE);
         label_options = _("do you want to close darktable now to manually restore\n"
@@ -3118,24 +4372,27 @@ start:
 
       if(resp != GTK_RESPONSE_ACCEPT && resp != GTK_RESPONSE_REJECT)
       {
-        fprintf(stderr, "[init] database `%s' is corrupt and can't be opened! either replace it from a backup or "
-        "delete the file so that darktable can create a new one the next time. aborting\n", dbfilename_data);
+        dt_print(DT_DEBUG_ALWAYS,
+                 "[init] database `%s' is corrupt and can't be opened! either replace it from a backup or "
+                 "delete the file so that darktable can create a new one the next time. aborting\n",
+                 dbfilename_data);
         g_free(data_snap);
         goto error;
       }
 
       //here were sure that response is either accept (restore from snap) or reject (just delete the damaged db)
 
-      fprintf(stderr, "[init] deleting `%s' on user request", dbfilename_data);
+      dt_print(DT_DEBUG_ALWAYS, "[init] deleting `%s' on user request", dbfilename_data);
 
       if(g_unlink(dbfilename_data) == 0)
-        fprintf(stderr, " ... ok\n");
+        dt_print(DT_DEBUG_ALWAYS, " ... ok\n");
       else
-        fprintf(stderr, " ... failed\n");
+        dt_print(DT_DEBUG_ALWAYS, " ... failed\n");
 
       if(resp == GTK_RESPONSE_ACCEPT && data_snap)
       {
-        fprintf(stderr, "[init] restoring `%s' from `%s'...", dbfilename_data, data_snap);
+        dt_print(DT_DEBUG_ALWAYS, "[init] restoring `%s' from `%s'...",
+                 dbfilename_data, data_snap);
         GError *gerror = NULL;
         if(!g_file_test(dbfilename_data, G_FILE_TEST_EXISTS))
         {
@@ -3154,9 +4411,9 @@ start:
             if(fd < 0 || !g_close(fd, &gerror)) copy_status = FALSE;
           }
           if(copy_status)
-            fprintf(stderr, " success!\n");
+            dt_print(DT_DEBUG_ALWAYS, " success!\n");
           else
-            fprintf(stderr, " failed!\n");
+            dt_print(DT_DEBUG_ALWAYS, " failed!\n");
 
           g_object_unref(src);
           g_object_unref(dest);
@@ -3171,7 +4428,9 @@ start:
   gchar* libdb_status = _get_pragma_string_val(db->handle, "main.quick_check");
   // next we are looking at the library database
   // does the db contain the new 'db_info' table?
-  rc = sqlite3_prepare_v2(db->handle, "select value from main.db_info where key = 'version'", -1, &stmt, NULL);
+  rc = sqlite3_prepare_v2(db->handle,
+                          "SELECT value FROM main.db_info WHERE key = 'version'",
+                          -1, &stmt, NULL);
   if(!g_strcmp0(libdb_status, "ok") && rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW)
   {
     g_free(libdb_status);//it's ok :)
@@ -3182,28 +4441,31 @@ start:
     sqlite3_finalize(stmt);
     if(db_version < CURRENT_DATABASE_VERSION_LIBRARY)
     {
-      ask_for_upgrade(dbfilename_library, has_gui);
+      _ask_for_upgrade(dbfilename_library, has_gui);
 
       // older: upgrade
       if(!_upgrade_library_schema(db, db_version))
       {
         // we couldn't upgrade the db for some reason. bail out.
-        fprintf(stderr, "[init] database `%s' couldn't be upgraded from version %d to %d. aborting\n", dbname,
-                db_version, CURRENT_DATABASE_VERSION_LIBRARY);
+        dt_print(DT_DEBUG_ALWAYS,
+                 "[init] database `%s' couldn't be upgraded from version %d to %d. aborting\n",
+                 dbname, db_version, CURRENT_DATABASE_VERSION_LIBRARY);
         dt_database_destroy(db);
         db = NULL;
         goto error;
       }
 
-      // upgrade was successfull, time for some housekeeping
+      // upgrade was successful, time for some housekeeping
       sqlite3_exec(db->handle, "VACUUM main", NULL, NULL, NULL);
       sqlite3_exec(db->handle, "ANALYZE main", NULL, NULL, NULL);
     }
     else if(db_version > CURRENT_DATABASE_VERSION_LIBRARY)
     {
       // newer: bail out. it's better than what we did before: delete everything
-      fprintf(stderr, "[init] database version of `%s' is too new for this build of darktable. aborting\n",
-              dbname);
+      _too_new_db_version(dbfilename_library, has_gui);
+      dt_print(DT_DEBUG_ALWAYS,
+               "[init] database version of `%s' is too new for this build of darktable. aborting\n",
+               dbname);
       dt_database_destroy(db);
       db = NULL;
       goto error;
@@ -3238,12 +4500,9 @@ start:
       dialog = gtk_dialog_new_with_buttons(_("darktable - error opening database"),
                                           NULL,
                                           dflags,
-                                          _("close darktable"),
-                                          GTK_RESPONSE_CLOSE,
-                                          _("attempt restore"),
-                                          GTK_RESPONSE_ACCEPT,
-                                          _("delete database"),
-                                          GTK_RESPONSE_REJECT,
+                                          _("_close darktable"), GTK_RESPONSE_CLOSE,
+                                          _("_attempt restore"), GTK_RESPONSE_ACCEPT,
+                                          _("_delete database"), GTK_RESPONSE_REJECT,
                                           NULL);
       gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
       label_options = _("do you want to close darktable now to manually restore\n"
@@ -3256,10 +4515,8 @@ start:
       dialog = gtk_dialog_new_with_buttons(_("darktable - error opening database"),
                                           NULL,
                                           dflags,
-                                          _("close darktable"),
-                                          GTK_RESPONSE_CLOSE,
-                                          _("delete database"),
-                                          GTK_RESPONSE_REJECT,
+                                          _("_close darktable"), GTK_RESPONSE_CLOSE,
+                                          _("_delete database"), GTK_RESPONSE_REJECT,
                                           NULL);
       gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_CLOSE);
       label_options = _("do you want to close darktable now to manually restore\n"
@@ -3296,24 +4553,27 @@ start:
 
     if(resp != GTK_RESPONSE_ACCEPT && resp != GTK_RESPONSE_REJECT)
     {
-      fprintf(stderr, "[init] database `%s' is corrupt and can't be opened! either replace it from a backup or "
-        "delete the file so that darktable can create a new one the next time. aborting\n", dbfilename_library);
+      dt_print(DT_DEBUG_ALWAYS,
+               "[init] database `%s' is corrupt and can't be opened! either replace it from a backup or "
+               "delete the file so that darktable can create a new one the next time. aborting\n",
+               dbfilename_library);
       g_free(data_snap);
       goto error;
     }
 
     //here were sure that response is either accept (restore from snap) or reject (just delete the damaged db)
 
-    fprintf(stderr, "[init] deleting `%s' on user request", dbfilename_library);
+    dt_print(DT_DEBUG_ALWAYS, "[init] deleting `%s' on user request", dbfilename_library);
 
     if(g_unlink(dbfilename_library) == 0)
-      fprintf(stderr, " ... ok\n");
+      dt_print(DT_DEBUG_ALWAYS, " ... ok\n");
     else
-      fprintf(stderr, " ... failed\n");
+      dt_print(DT_DEBUG_ALWAYS, " ... failed\n");
 
     if(resp == GTK_RESPONSE_ACCEPT && data_snap)
     {
-      fprintf(stderr, "[init] restoring `%s' from `%s'...", dbfilename_library, data_snap);
+      dt_print(DT_DEBUG_ALWAYS, "[init] restoring `%s' from `%s'...",
+               dbfilename_library, data_snap);
       GError *gerror = NULL;
       if(!g_file_test(dbfilename_library, G_FILE_TEST_EXISTS))
       {
@@ -3332,9 +4592,9 @@ start:
           if(fd < 0 || !g_close(fd, &gerror)) copy_status = FALSE;
         }
         if(copy_status)
-          fprintf(stderr, " success!\n");
+          dt_print(DT_DEBUG_ALWAYS, " success!\n");
         else
-          fprintf(stderr, " failed!\n");
+          dt_print(DT_DEBUG_ALWAYS, " failed!\n");
         g_object_unref(src);
         g_object_unref(dest);
       }
@@ -3347,19 +4607,20 @@ start:
   {
     // does it contain the legacy 'settings' table?
     sqlite3_finalize(stmt);
-    rc = sqlite3_prepare_v2(db->handle, "select settings from main.settings", -1, &stmt, NULL);
+    rc = sqlite3_prepare_v2(db->handle, "SELECT settings FROM main.settings", -1, &stmt, NULL);
     if(rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW)
     {
       // the old blob had the version as an int in the first place
       const void *set = sqlite3_column_blob(stmt, 0);
       const int db_version = *(int *)set;
       sqlite3_finalize(stmt);
-      if(!_migrate_schema(db, db_version)) // bring the legacy layout to the first one known to our upgrade
-                                           // path ...
+      if(!_migrate_schema(db, db_version)) // bring the legacy layout to the first one known
+                                           // to our upgrade path ...
       {
         // we couldn't migrate the db for some reason. bail out.
-        fprintf(stderr, "[init] database `%s' couldn't be migrated from the legacy version %d. aborting\n",
-                dbname, db_version);
+        dt_print(DT_DEBUG_ALWAYS,
+                 "[init] database `%s' couldn't be migrated from the legacy version %d. aborting\n",
+                 dbname, db_version);
         dt_database_destroy(db);
         db = NULL;
         goto error;
@@ -3367,8 +4628,9 @@ start:
       if(!_upgrade_library_schema(db, 1)) // ... and upgrade it
       {
         // we couldn't upgrade the db for some reason. bail out.
-        fprintf(stderr, "[init] database `%s' couldn't be upgraded from version 1 to %d. aborting\n", dbname,
-                CURRENT_DATABASE_VERSION_LIBRARY);
+        dt_print(DT_DEBUG_ALWAYS,
+                 "[init] database `%s' couldn't be upgraded from version 1 to %d. aborting\n",
+                 dbname, CURRENT_DATABASE_VERSION_LIBRARY);
         dt_database_destroy(db);
         db = NULL;
         goto error;
@@ -3384,11 +4646,8 @@ start:
   // create the in-memory tables
   _create_memory_schema(db);
 
-  // create a table legacy_presets with all the presets from pre-auto-apply-cleanup darktable.
-  dt_legacy_presets_create(db);
-
   // drop table settings -- we don't want old versions of dt to drop our tables
-  sqlite3_exec(db->handle, "drop table main.settings", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "DROP TABLE main.settings", NULL, NULL, NULL);
 
   // take care of potential bad data in the db.
   _sanitize_db(db);
@@ -3405,7 +4664,7 @@ start:
   {
     rc = sqlite3IcuInit(db->handle);
     if(rc != SQLITE_OK)
-      fprintf(stderr, "[sqlite] init icu extension error %d\n", rc);
+      dt_print(DT_DEBUG_ALWAYS, "[sqlite] init icu extension error %d\n", rc);
   }
 #endif
 
@@ -3415,15 +4674,53 @@ error:
   return db;
 }
 
+void dt_upgrade_maker_model(const dt_database_t *db)
+{
+  sqlite3_stmt *stmt;
+
+  // check if updating the camera table is needed (done for each new darktable version)
+
+  sqlite3_prepare_v2(db->handle,
+                     "SELECT value"
+                     " FROM main.db_info"
+                     " WHERE key = 'dt_version'",
+                     -1, &stmt, NULL);
+  char *dt_version = NULL;
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+  {
+    dt_version = (char *)sqlite3_column_text(stmt, 0);
+  }
+
+  if(!dt_version || strcmp(dt_version, darktable_package_version))
+  {
+    _upgrade_camera_table(db);
+
+    sqlite3_finalize(stmt);
+
+    sqlite3_prepare_v2(db->handle,
+                       "INSERT OR REPLACE"
+                       " INTO main.db_info (key, value)"
+                       " VALUES ('dt_version', ?1)",
+                       -1, &stmt, NULL);
+    sqlite3_bind_text(stmt, 1, darktable_package_version, -1, SQLITE_TRANSIENT);
+    if(sqlite3_step(stmt) != SQLITE_DONE)
+    {
+      dt_print(DT_DEBUG_ALWAYS, "[init] can't insert/update new dt_version\n");
+    }
+  }
+
+  sqlite3_finalize(stmt);
+}
+
 void dt_database_destroy(const dt_database_t *db)
 {
   sqlite3_close(db->handle);
-  if (db->lockfile_data)
+  if(db->lockfile_data)
   {
     g_unlink(db->lockfile_data);
     g_free(db->lockfile_data);
   }
-  if (db->lockfile_library)
+  if(db->lockfile_library)
   {
     g_unlink(db->lockfile_library);
     g_free(db->lockfile_library);
@@ -3447,7 +4744,6 @@ const gchar *dt_database_get_path(const struct dt_database_t *db)
 
 static void _database_migrate_to_xdg_structure()
 {
-  gchar dbfilename[PATH_MAX] = { 0 };
   gchar *conf_db = dt_conf_get_string("database");
 
   gchar datadir[PATH_MAX] = { 0 };
@@ -3456,18 +4752,19 @@ static void _database_migrate_to_xdg_structure()
   if(conf_db && conf_db[0] != '/')
   {
     const char *homedir = getenv("HOME");
-    snprintf(dbfilename, sizeof(dbfilename), "%s/%s", homedir, conf_db);
+    gchar *dbfilename = g_strdup_printf("%s/%s", homedir, conf_db);
     if(g_file_test(dbfilename, G_FILE_TEST_EXISTS))
     {
-      char destdbname[PATH_MAX] = { 0 };
-      snprintf(destdbname, sizeof(dbfilename), "%s/%s", datadir, "library.db");
+      gchar *destdbname = g_strdup_printf("%s/%s", datadir, "library.db");
       if(!g_file_test(destdbname, G_FILE_TEST_EXISTS))
       {
-        fprintf(stderr, "[init] moving database into new XDG directory structure\n");
+        dt_print(DT_DEBUG_ALWAYS, "[init] moving database into new XDG directory structure\n");
         rename(dbfilename, destdbname);
         dt_conf_set_string("database", "library.db");
       }
+      g_free(destdbname);
     }
+    g_free(dbfilename);
   }
 
   g_free(conf_db);
@@ -3486,7 +4783,7 @@ static void _database_delete_mipmaps_files()
 
   if(g_access(mipmapfilename, F_OK) != -1)
   {
-    fprintf(stderr, "[mipmap_cache] dropping old version file: %s\n", mipmapfilename);
+    dt_print(DT_DEBUG_ALWAYS, "[mipmap_cache] dropping old version file: %s\n", mipmapfilename);
     g_unlink(mipmapfilename);
 
     snprintf(mipmapfilename, sizeof(mipmapfilename), "%s/mipmaps.fallback", cachedir);
@@ -3508,7 +4805,8 @@ void dt_database_cleanup_busy_statements(const struct dt_database_t *db)
     const char* sql = sqlite3_sql(stmt);
     if(sqlite3_stmt_busy(stmt))
     {
-      dt_print(DT_DEBUG_SQL, "[db busy stmt] non-finalized nor stepped through statement: '%s'\n",sql);
+      dt_print(DT_DEBUG_SQL,
+               "[db busy stmt] non-finalized nor stepped through statement: '%s'\n",sql);
       sqlite3_reset(stmt);
     }
     else {
@@ -3518,7 +4816,7 @@ void dt_database_cleanup_busy_statements(const struct dt_database_t *db)
   }
 }
 
-#define ERRCHECK {if (err!=NULL) {dt_print(DT_DEBUG_SQL, "[db maintenance] maintenance error: '%s'\n",err); sqlite3_free(err); err=NULL;}}
+#define ERRCHECK {if(err!=NULL) {dt_print(DT_DEBUG_SQL, "[db maintenance] maintenance error: '%s'\n",err); sqlite3_free(err); err=NULL;}}
 void dt_database_perform_maintenance(const struct dt_database_t *db)
 {
   char* err = NULL;
@@ -3532,7 +4830,8 @@ void dt_database_perform_maintenance(const struct dt_database_t *db)
 
   if(calc_pre_size == 0)
   {
-    dt_print(DT_DEBUG_SQL, "[db maintenance] maintenance deemed unnecesary, performing only analyze.\n");
+    dt_print(DT_DEBUG_SQL,
+             "[db maintenance] maintenance deemed unnecessary, performing only analyze.\n");
     DT_DEBUG_SQLITE3_EXEC(db->handle, "ANALYZE data", NULL, NULL, &err);
     ERRCHECK
     DT_DEBUG_SQLITE3_EXEC(db->handle, "ANALYZE main", NULL, NULL, &err);
@@ -3564,96 +4863,27 @@ void dt_database_perform_maintenance(const struct dt_database_t *db)
   const guint64 calc_post_size = (main_post_free_count*main_page_size) + (data_post_free_count*data_page_size);
   const gint64 bytes_freed = calc_pre_size - calc_post_size;
 
-  dt_print(DT_DEBUG_SQL, "[db maintenance] maintenance done, %" G_GINT64_FORMAT " bytes freed.\n", bytes_freed);
+  dt_print(DT_DEBUG_SQL,
+           "[db maintenance] maintenance done, %" G_GINT64_FORMAT " bytes freed.\n",
+           bytes_freed);
 
   if(calc_post_size >= calc_pre_size)
   {
-    dt_print(DT_DEBUG_SQL, "[db maintenance] maintenance problem. if no errors logged, it should work fine next time.\n");
+    dt_print(DT_DEBUG_SQL,
+             "[db maintenance] maintenance problem. if no errors logged, it should work fine next time.\n");
   }
 }
 #undef ERRCHECK
-
-gboolean _ask_for_maintenance(const gboolean has_gui, const gboolean closing_time, const guint64 size)
-{
-  if(!has_gui)
-  {
-    return FALSE;
-  }
-
-  char *later_info = NULL;
-  char *size_info = g_format_size(size);
-  const char *config = dt_conf_get_string_const("database/maintenance_check");
-  if((closing_time && (!g_strcmp0(config, "on both"))) || !g_strcmp0(config, "on startup"))
-  {
-    later_info = _("click later to be asked on next startup");
-  }
-  else if (!closing_time && (!g_strcmp0(config, "on both")))
-  {
-    later_info = _("click later to be asked when closing darktable");
-  }
-  else if (!g_strcmp0(config, "on close"))
-  {
-    later_info = _("click later to be asked next time when closing darktable");
-  }
-
-  char *label_text = g_markup_printf_escaped(_("the database could use some maintenance\n"
-                                                 "\n"
-                                                 "there's <span style='italic'>%s</span> to be freed"
-                                                 "\n\n"
-                                                 "do you want to proceed now?\n\n"
-                                                 "%s\n"
-                                                 "you can always change maintenance preferences in core options"),
-                                                 size_info, later_info);
-
-    const gboolean shall_perform_maintenance =
-      dt_gui_show_standalone_yes_no_dialog(_("darktable - schema maintenance"), label_text,
-                                           _("later"), _("yes"));
-
-    g_free(label_text);
-    g_free(size_info);
-
-    return shall_perform_maintenance;
-}
 
 static inline gboolean _is_mem_db(const struct dt_database_t *db)
 {
   return !g_strcmp0(db->dbfilename_data, ":memory:") || !g_strcmp0(db->dbfilename_library, ":memory:");
 }
 
-gboolean dt_database_maybe_maintenance(const struct dt_database_t *db, const gboolean has_gui, const gboolean closing_time)
+gboolean dt_database_maybe_maintenance(const struct dt_database_t *db)
 {
   if(_is_mem_db(db))
     return FALSE;
-
-  const char *config = dt_conf_get_string_const("database/maintenance_check");
-
-  if(!g_strcmp0(config, "never"))
-  {
-    // early bail out on "never"
-    dt_print(DT_DEBUG_SQL, "[db maintenance] please consider enabling database maintenance.\n");
-    return FALSE;
-  }
-
-  gboolean check_for_maintenance = FALSE;
-  const gboolean force_maintenance = g_str_has_suffix (config, "(don't ask)");
-
-  if(config)
-  {
-    if((strstr(config, "on both")) // should cover "(don't ask) suffix
-        || (closing_time && (strstr(config, "on close")))
-        || (!closing_time && (strstr(config, "on startup"))))
-    {
-      // we have "on both/on close/on startup" setting, so - checking!
-      dt_print(DT_DEBUG_SQL, "[db maintenance] checking for maintenance, due to rule: '%s'.\n", config);
-      check_for_maintenance = TRUE;
-    }
-    // if the config was "never", check_for_vacuum is false.
-  }
-
-  if(!check_for_maintenance)
-  {
-    return FALSE;
-  }
 
   // checking free pages
   const int main_free_count = _get_pragma_int_val(db->handle, "main.freelist_count");
@@ -3665,15 +4895,15 @@ gboolean dt_database_maybe_maintenance(const struct dt_database_t *db, const gbo
   const int data_page_size = _get_pragma_int_val(db->handle, "data.page_size");
 
   dt_print(DT_DEBUG_SQL,
-      "[db maintenance] main: [%d/%d pages], data: [%d/%d pages].\n",
-      main_free_count, main_page_count, data_free_count, data_page_count);
+           "[db maintenance] main: [%d/%d pages], data: [%d/%d pages].\n",
+           main_free_count, main_page_count, data_free_count, data_page_count);
 
   if(main_page_count <= 0 || data_page_count <= 0)
   {
     //something's wrong with PRAGMA page_size returns. early bail.
     dt_print(DT_DEBUG_SQL,
-        "[db maintenance] page_count <= 0 : main.page_count: %d, data.page_count: %d \n",
-        main_page_count, data_page_count);
+             "[db maintenance] page_count <= 0 : main.page_count: %d, data.page_count: %d \n",
+             main_page_count, data_page_count);
     return FALSE;
   }
 
@@ -3684,16 +4914,15 @@ gboolean dt_database_maybe_maintenance(const struct dt_database_t *db, const gbo
   const int freepage_ratio = dt_conf_get_int("database/maintenance_freepage_ratio");
 
   if((main_free_percentage >= freepage_ratio)
-      || (data_free_percentage >= freepage_ratio))
+     || (data_free_percentage >= freepage_ratio))
   {
     const guint64 calc_size = (main_free_count*main_page_size) + (data_free_count*data_page_size);
-    dt_print(DT_DEBUG_SQL, "[db maintenance] maintenance suggested, %" G_GUINT64_FORMAT " bytes to free.\n", calc_size);
-
-    if(force_maintenance || _ask_for_maintenance(has_gui, closing_time, calc_size))
-    {
-      return TRUE;
-    }
+    dt_print(DT_DEBUG_SQL,
+             "[db maintenance] maintenance, %" G_GUINT64_FORMAT " bytes to free.\n",
+             calc_size);
+    return TRUE;
   }
+
   return FALSE;
 }
 
@@ -3721,7 +4950,6 @@ static int _backup_db(
 )
 {
   sqlite3 *dest_db;             /* Database connection opened on zFilename */
-  sqlite3_backup *sb_dest;    /* Backup handle used to copy data */
 
   /* Open the database file identified by zFilename. */
   int rc = sqlite3_open(dest_filename, &dest_db);
@@ -3729,7 +4957,7 @@ static int _backup_db(
   if(rc == SQLITE_OK)
   {
     /* Open the sqlite3_backup object used to accomplish the transfer */
-    sb_dest = sqlite3_backup_init(dest_db, "main", src_db, src_db_name);
+    sqlite3_backup *sb_dest = sqlite3_backup_init(dest_db, "main", src_db, src_db_name);
     if(sb_dest)
     {
       dt_print(DT_DEBUG_SQL, "[db backup] %s to %s\n", src_db_name, dest_filename);
@@ -3822,7 +5050,8 @@ gboolean dt_database_maybe_snapshot(const struct dt_database_t *db)
   if(!g_strcmp0(config, "never"))
   {
     // early bail out on "never"
-    dt_print(DT_DEBUG_SQL, "[db backup] please consider enabling database snapshots.\n");
+    dt_print(DT_DEBUG_SQL,
+             "[db backup] please consider enabling database snapshots.\n");
     return FALSE;
   }
   if(!g_strcmp0(config, "on close"))
@@ -3850,7 +5079,9 @@ gboolean dt_database_maybe_snapshot(const struct dt_database_t *db)
   else
   {
     // early bail out on "invalid value"
-    dt_print(DT_DEBUG_SQL, "[db backup] invalid timespan requirement expecting never/on close/once a [day/week/month], got %s.\n", config);
+    dt_print(DT_DEBUG_SQL,
+             "[db backup] invalid timespan requirement expecting never/on close/once a [day/week/month], got %s.\n",
+             config);
     return TRUE;
   }
 
@@ -3892,7 +5123,7 @@ gboolean dt_database_maybe_snapshot(const struct dt_database_t *db)
   GFileInfo *info = NULL;
   guint64 last_snap = 0;
 
-  while ((info = g_file_enumerator_next_file(library_dir_files, NULL, &error)))
+  while((info = g_file_enumerator_next_file(library_dir_files, NULL, &error)))
   {
     const char* fname = g_file_info_get_name(info);
     if(g_str_has_prefix(fname, lib_snap_format) || g_str_has_prefix(fname, lib_backup_format))
@@ -3953,13 +5184,13 @@ static gboolean _get_iso8601_int (const gchar *text, gsize length, gint *value)
   gsize i;
   guint v = 0;
 
-  if (length < 1 || length > 4)
+  if(length < 1 || length > 4)
     return FALSE;
 
-  for (i = 0; i < length; i++)
+  for(i = 0; i < length; i++)
   {
     const gchar c = text[i];
-    if (c < '0' || c > '9')
+    if(c < '0' || c > '9')
       return FALSE;
     v = v * 10 + (c - '0');
   }
@@ -4078,7 +5309,9 @@ char **dt_database_snaps_to_remove(const struct dt_database_t *db)
 
     if(library_dir_files == NULL)
     {
-      dt_print(DT_DEBUG_SQL, "[db backup] couldn't enumerate library parent: %s.\n", error->message);
+      dt_print(DT_DEBUG_SQL,
+               "[db backup] couldn't enumerate library parent: %s.\n",
+               error->message);
       g_object_unref(lib_parent);
       g_object_unref(dat_parent);
       g_free(lib_snap_format);
@@ -4095,7 +5328,7 @@ char **dt_database_snaps_to_remove(const struct dt_database_t *db)
 
     GFileInfo *info = NULL;
 
-    while ((info = g_file_enumerator_next_file(library_dir_files, NULL, &error)))
+    while((info = g_file_enumerator_next_file(library_dir_files, NULL, &error)))
     {
       const char* fname = g_file_info_get_name(info);
       if(g_str_has_prefix(fname, lib_snap_format))
@@ -4145,7 +5378,9 @@ char **dt_database_snaps_to_remove(const struct dt_database_t *db)
     GFileEnumerator *library_dir_files = g_file_enumerate_children(lib_parent, G_FILE_ATTRIBUTE_STANDARD_NAME, G_FILE_QUERY_INFO_NONE, NULL, &error);
     if(library_dir_files == NULL)
     {
-      dt_print(DT_DEBUG_SQL, "[db backup] couldn't enumerate library parent: %s.\n", error->message);
+      dt_print(DT_DEBUG_SQL,
+               "[db backup] couldn't enumerate library parent: %s.\n",
+               error->message);
       g_object_unref(lib_parent);
       g_object_unref(dat_parent);
       g_free(lib_snap_format);
@@ -4163,7 +5398,9 @@ char **dt_database_snaps_to_remove(const struct dt_database_t *db)
     GFileEnumerator *data_dir_files = g_file_enumerate_children(dat_parent, G_FILE_ATTRIBUTE_STANDARD_NAME, G_FILE_QUERY_INFO_NONE, NULL, &error);
     if(data_dir_files == NULL)
     {
-      dt_print(DT_DEBUG_SQL, "[db backup] couldn't enumerate data parent: %s.\n", error->message);
+      dt_print(DT_DEBUG_SQL,
+               "[db backup] couldn't enumerate data parent: %s.\n",
+               error->message);
       g_object_unref(lib_parent);
       g_object_unref(dat_parent);
       g_free(lib_snap_format);
@@ -4182,7 +5419,7 @@ char **dt_database_snaps_to_remove(const struct dt_database_t *db)
 
     GFileInfo *info = NULL;
 
-    while ((info = g_file_enumerator_next_file(library_dir_files, NULL, &error)))
+    while((info = g_file_enumerator_next_file(library_dir_files, NULL, &error)))
     {
       const char* fname = g_file_info_get_name(info);
       if(g_str_has_prefix(fname, lib_snap_format))
@@ -4201,7 +5438,9 @@ char **dt_database_snaps_to_remove(const struct dt_database_t *db)
 
     if(error)
     {
-      dt_print(DT_DEBUG_SQL, "[db backup] problem enumerating library parent: %s.\n", error->message);
+      dt_print(DT_DEBUG_SQL,
+               "[db backup] problem enumerating library parent: %s.\n",
+               error->message);
       g_object_unref(lib_parent);
       g_object_unref(dat_parent);
       g_free(lib_tmp_format);
@@ -4220,7 +5459,7 @@ char **dt_database_snaps_to_remove(const struct dt_database_t *db)
     g_file_enumerator_close(library_dir_files, NULL, NULL);
     g_object_unref(library_dir_files);
 
-    while ((info = g_file_enumerator_next_file(data_dir_files, NULL, &error)))
+    while((info = g_file_enumerator_next_file(data_dir_files, NULL, &error)))
     {
       const char* fname = g_file_info_get_name(info);
       if(g_str_has_prefix(fname, dat_snap_format))
@@ -4241,7 +5480,9 @@ char **dt_database_snaps_to_remove(const struct dt_database_t *db)
 
     if(error)
     {
-      dt_print(DT_DEBUG_SQL, "[db backup] problem enumerating data parent: %s.\n", error->message);
+      dt_print(DT_DEBUG_SQL,
+               "[db backup] problem enumerating data parent: %s.\n",
+               error->message);
       g_object_unref(lib_parent);
       g_object_unref(dat_parent);
       g_queue_free_full(lib_snaps, g_free);
@@ -4327,7 +5568,9 @@ gchar *dt_database_get_most_recent_snap(const char* db_filename)
 
   if(db_dir_files == NULL)
   {
-    dt_print(DT_DEBUG_SQL, "[db backup] couldn't enumerate database parent: %s.\n", error->message);
+    dt_print(DT_DEBUG_SQL,
+             "[db backup] couldn't enumerate database parent: %s.\n",
+             error->message);
     g_object_unref(parent);
     g_object_unref(db_file);
     g_error_free(error);
@@ -4345,7 +5588,7 @@ gchar *dt_database_get_most_recent_snap(const char* db_filename)
   guint64 last_snap = 0;
   gchar *last_snap_name = NULL;
 
-  while ((info = g_file_enumerator_next_file(db_dir_files, NULL, &error)))
+  while((info = g_file_enumerator_next_file(db_dir_files, NULL, &error)))
   {
     const char* fname = g_file_info_get_name(info);
     if(g_str_has_prefix(fname, db_snap_format) || g_str_has_prefix(fname, db_backup_format))
@@ -4373,7 +5616,9 @@ gchar *dt_database_get_most_recent_snap(const char* db_filename)
 
   if(error)
   {
-    dt_print(DT_DEBUG_SQL, "[db backup] problem enumerating database parent: %s.\n", error->message);
+    dt_print(DT_DEBUG_SQL,
+             "[db backup] problem enumerating database parent: %s.\n",
+             error->message);
     g_file_enumerator_close(db_dir_files, NULL, NULL);
     g_object_unref(db_dir_files);
     g_error_free(error);
@@ -4419,23 +5664,31 @@ void dt_database_start_transaction(const struct dt_database_t *db)
   // if top level a simple unamed transaction is used BEGIN / COMMIT / ROLLBACK
   // otherwise we use a savepoint (named transaction).
 
-  if(trxid == 0 || TRUE)
+  if(trxid == 0)
   {
     // In theads application it may be safer to use an IMMEDIATE transaction:
     // "BEGIN IMMEDIATE TRANSACTION"
     DT_DEBUG_SQLITE3_EXEC(dt_database_get(db), "BEGIN TRANSACTION", NULL, NULL, NULL);
   }
-#ifdef USE_NESTED_TRANSACTIONS
   else
+#ifdef USE_NESTED_TRANSACTIONS
   {
     char SQLTRX[32] = { 0 };
     g_snprintf(SQLTRX, sizeof(SQLTRX), "SAVEPOINT trx%d", trxid);
     DT_DEBUG_SQLITE3_EXEC(dt_database_get(db), SQLTRX, NULL, NULL, NULL);
   }
+#else
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_database_start_transaction] nested transaction detected (%d)\n",
+             trxid);
+  }
 #endif
 
   if(trxid > MAX_NESTED_TRANSACTIONS)
-    fprintf(stderr, "[dt_database_start_transaction] more than %d nested transaction\n", MAX_NESTED_TRANSACTIONS);
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_database_start_transaction] more than %d nested transaction\n",
+             MAX_NESTED_TRANSACTIONS);
 }
 
 void dt_database_release_transaction(const struct dt_database_t *db)
@@ -4443,18 +5696,25 @@ void dt_database_release_transaction(const struct dt_database_t *db)
   const int trxid = dt_atomic_sub_int(&_trxid, 1);
 
   if(trxid <= 0)
-    fprintf(stderr, "[dt_database_release_transaction] COMMIT outside a transaction\n");
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_database_release_transaction] COMMIT outside a transaction\n");
 
-  if(trxid == 1 || TRUE)
+  if(trxid == 1)
   {
     DT_DEBUG_SQLITE3_EXEC(dt_database_get(db), "COMMIT TRANSACTION", NULL, NULL, NULL);
   }
-#ifdef USE_NESTED_TRANSACTIONS
   else
+#ifdef USE_NESTED_TRANSACTIONS
   {
     char SQLTRX[64] = { 0 };
     g_snprintf(SQLTRX, sizeof(SQLTRX), "RELEASE SAVEPOINT trx%d", trxid - 1);
     DT_DEBUG_SQLITE3_EXEC(dt_database_get(db), SQLTRX, NULL, NULL, NULL);
+  }
+#else
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_database_end_transaction] nested transaction detected (%d)\n",
+             trxid);
   }
 #endif
 }
@@ -4464,22 +5724,31 @@ void dt_database_rollback_transaction(const struct dt_database_t *db)
   const int trxid = dt_atomic_sub_int(&_trxid, 1);
 
   if(trxid <= 0)
-    fprintf(stderr, "[dt_database_rollback_transaction] ROLLBACK outside a transaction\n");
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_database_rollback_transaction] ROLLBACK outside a transaction\n");
 
-  if(trxid == 1 || TRUE)
+  if(trxid == 1)
   {
     DT_DEBUG_SQLITE3_EXEC(dt_database_get(db), "ROLLBACK TRANSACTION", NULL, NULL, NULL);
   }
-#ifdef USE_NESTED_TRANSACTIONS
   else
+#ifdef USE_NESTED_TRANSACTIONS
   {
     char SQLTRX[64] = { 0 };
     g_snprintf(SQLTRX, sizeof(SQLTRX), "ROLLBACK TRANSACTION TO SAVEPOINT trx%d", trxid - 1);
     DT_DEBUG_SQLITE3_EXEC(dt_database_get(db), SQLTRX, NULL, NULL, NULL);
   }
+#else
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_database_rollback_transaction] nested transaction detected (%d)\n",
+             trxid);
+  }
 #endif
 }
 
-// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
+// clang-format off
+// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
+// clang-format on
